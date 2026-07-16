@@ -1,12 +1,17 @@
 using System.Diagnostics;
+using SharpDX;
+using SmoothieBackend.Services;
 
 namespace SmoothieBackend.API;
 
 public static class BlenderAddonAPI
 {
+    private static WorldStreamingService _worldStreamingService;
+    
     public static void Initialize()
     {
         Debugger.Launch();
+        _worldStreamingService = new WorldStreamingService();
     }
     
     public static int GetInt()
@@ -17,6 +22,6 @@ public static class BlenderAddonAPI
 
     public static void OnStreamingTick(float cameraX, float cameraY, float cameraZ)
     {
-        Console.WriteLine("Streaming tick with camera: " + cameraX + ", " + cameraY + ", " + cameraZ + "");
+        _worldStreamingService.Tick(new Vector3(cameraX, cameraY, cameraZ));
     }
 }
