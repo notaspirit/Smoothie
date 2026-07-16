@@ -14,4 +14,9 @@ public static class BlenderAddonAPI
         var random = new Random().Next();
         return random;
     }
+
+    public static void OnStreamingTick(float cameraX, float cameraY, float cameraZ)
+    {
+        Console.WriteLine("Streaming tick with camera: " + cameraX + ", " + cameraY + ", " + cameraZ + "");
+    }
 }

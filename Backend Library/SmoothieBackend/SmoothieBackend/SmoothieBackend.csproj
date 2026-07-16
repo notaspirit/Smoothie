@@ -9,6 +9,13 @@
     <PropertyGroup>
         <BlenderAddonDir>F:\dev0\prjk\Smoothie\Blender Addon\lib</BlenderAddonDir>
     </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="WolvenKit.Common" Version="8.19.0" />
+      <PackageReference Include="WolvenKit.Core" Version="8.19.0" />
+      <PackageReference Include="WolvenKit.Modkit" Version="8.19.0" />
+      <PackageReference Include="WolvenKit.RED4" Version="8.19.0" />
+    </ItemGroup>
     
     <Target Name="CopyToBlender" AfterTargets="Build">
         <ItemGroup>

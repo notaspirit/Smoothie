@@ -86,6 +86,17 @@ clr.AddReference("SmoothieBackend")
 from SmoothieBackend.API import BlenderAddonAPI
 BlenderAddonAPI.Initialize()
 
+def on_streaming_tick():
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            region_3d = area.spaces.active.region_3d
+
+            location = region_3d.view_matrix.inverted().translation
+            BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
+            return 1 / 3
+    return 1 / 3
+
+bpy.app.timers.register(on_streaming_tick, persistent=True)
 
 def register():
     print("Registering Smoothie World Editor")
