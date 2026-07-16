@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using SharpDX;
+using SmoothieBackend.Models;
 using SmoothieBackend.Services;
 
 namespace SmoothieBackend.API;
@@ -23,5 +24,25 @@ public static class BlenderAddonAPI
     public static void OnStreamingTick(float cameraX, float cameraY, float cameraZ)
     {
         _worldStreamingService.Tick(new Vector3(cameraX, cameraY, cameraZ));
+    }
+    
+    public static void StartStreaming()
+    {
+        _worldStreamingService.StartStreaming();
+    }
+    
+    public static void StopStreaming()
+    {
+        _worldStreamingService.StopStreaming();
+    }
+
+    public static IEnumerable<Node> GetLoadNodesQueue(int count)
+    {
+        return _worldStreamingService.GetLoadNodesQueue(count);
+    }
+    
+    public static IEnumerable<string> GetUnloadNodesQueue(int count)
+    {
+        return _worldStreamingService.GetUnloadNodesQueue(count);
     }
 }

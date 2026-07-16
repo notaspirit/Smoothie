@@ -66,6 +66,27 @@ def load_clr():
 
     return False
 
+def add_empty(id: str, position):
+    if id in tracked_empties:
+        # Already exists, maybe just update its position
+        tracked_empties[id].location = position
+        return
+
+    empty = bpy.data.objects.new(id, None)
+    empty.empty_display_type = 'PLAIN_AXES'
+    bpy.context.collection.objects.link(empty)
+
+    empty.location = position
+
+    tracked_empties[id] = empty
+
+def remove_empty(id: str):
+    empty = tracked_empties.pop(id, None)
+    if empty is None:
+        return
+
+    bpy.data.objects.remove(empty, do_unlink=True)
+
 ensure_vendor_on_path()
 if not load_clr():
     python_net_success, msg = ensure_pythonnet()
@@ -84,7 +105,12 @@ if LIB_DIR not in sys.path:
 clr.AddReference("SmoothieBackend")
 
 from SmoothieBackend.API import BlenderAddonAPI
+from mathutils import Vector
 BlenderAddonAPI.Initialize()
+
+BlenderAddonAPI.StartStreaming()
+
+tracked_empties: dict[str, bpy.types.Object] = {}
 
 def on_streaming_tick():
     for area in bpy.context.screen.areas:
@@ -93,7 +119,14 @@ def on_streaming_tick():
 
             location = region_3d.view_matrix.inverted().translation
             BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
-            return 1 / 3
+            break
+
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(300):
+        add_empty(new_node.Id, Vector((new_node.Position.X, new_node.Position.Y, new_node.Position.Z)))
+
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(300):
+        remove_empty(removed_node)
+
     return 1 / 3
 
 bpy.app.timers.register(on_streaming_tick, persistent=True)

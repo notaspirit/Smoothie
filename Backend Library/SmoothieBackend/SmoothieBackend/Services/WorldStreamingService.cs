@@ -7,6 +7,7 @@ using WolvenKit.Common;
 using WolvenKit.Common.Services;
 using WolvenKit.Core.Interfaces;
 using WolvenKit.Core.Services;
+using WolvenKit.RED4.Archive.Buffer;
 using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.CR2W.Archive;
 using WolvenKit.RED4.Types;
@@ -35,6 +36,12 @@ public class WorldStreamingService
     private readonly ConcurrentStack<string> _sectorUnloadQueue = new();
     private readonly ConcurrentDictionary<string, byte> _activeSectors = new();
     
+    private readonly ConcurrentStack<Node> _nodeLoadQueue = new();
+    private readonly ConcurrentStack<string> _nodeUnloadQueue = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<int, byte>> _activeNodes = new();
+    
+    private bool _isStreaming = false;
+    
     public WorldStreamingService()
     {
         _cameraPosition = Vector3.Zero;
@@ -53,32 +60,58 @@ public class WorldStreamingService
     
     public void StartStreaming()
     {
-        
+        _isStreaming = true;
+
+        for (var i = 0; i < ThreadCount; i++)
+        {
+            Task.Run(LoadSectorFromQueue);
+            Task.Run(UnloadSectorFromQueue);
+        }
     }
 
     public void StopStreaming()
     {
-        
+        _isStreaming = false;
     }
     
     public void Tick(Vector3 cameraPosition)
     {
-        if (_cameraPosition.Equals(cameraPosition))
+        if (_cameraPosition.Equals(cameraPosition) || !_isStreaming)
             return;
         
         _cameraPosition = cameraPosition;
         Console.WriteLine("Streaming tick with camera: " + _cameraPosition.X + ", " + _cameraPosition.Y + ", " + _cameraPosition.Z + "");
         Console.WriteLine("Sector descriptors: " + _sectorDescriptors.Count);
         CheckSectors();
+    }
 
-        while (_sectorLoadQueue.TryPop(out var sectorPath))
+    public IEnumerable<Node> GetLoadNodesQueue(int count)
+    {
+        var i = 0;
+        while (i < count && _nodeLoadQueue.TryPop(out var node))
         {
-            Console.WriteLine("Loading sector: " + sectorPath);
+            if (!_activeNodes.TryGetValue(node.Id.Split(' ')[0], out var nodes))
+                continue;
+            
+            if (!nodes.ContainsKey(int.Parse(node.Id.Split(' ')[1])))
+                continue;
+            
+            yield return node;
+            i++;
         }
-        
-        while (_sectorUnloadQueue.TryPop(out var sectorPath))
+    }
+    
+    public IEnumerable<string> GetUnloadNodesQueue(int count)
+    {
+        var i = 0;
+        while (i < count && _nodeUnloadQueue.TryPop(out var nodeId))
         {
-            // Console.WriteLine("Unloading sector: " + sectorPath);
+            if (_activeNodes.ContainsKey(nodeId))
+                yield return nodeId;
+            else
+                continue;
+            
+            i++;
         }
     }
 
@@ -123,6 +156,64 @@ public class WorldStreamingService
                     _sectorUnloadQueue.Push(sector.Path);
                 }
             }
+        }
+    }
+
+    private async Task LoadSectorFromQueue()
+    {
+        while (_isStreaming)
+        {
+            if (!_sectorLoadQueue.TryPop(out var sectorPath))
+                await Task.Delay(10);
+            
+            var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
+            if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } })
+                continue;
+            
+            var i = 0;
+            foreach (var node in nodeData)
+            {
+                var id = $"{sectorPath} {i}";
+                    
+                if (_activeNodes.ContainsKey(id))
+                    continue;
+                
+                if (_activeNodes.TryGetValue(id, out var nodeList))
+                    nodeList.TryAdd(i, 0);
+                else
+                {
+                    var dict = new ConcurrentDictionary<int, byte>();
+                    dict.TryAdd(i, 0);
+                    _activeNodes.TryAdd(sectorPath, dict);
+                }
+                
+                _nodeLoadQueue.Push(new Node
+                {
+                    Id = id,
+                    Position = node.Position.ToSDX().ToVector3()
+                });
+                
+                i++;
+            }
+        }
+    }
+
+    private async Task UnloadSectorFromQueue()
+    {
+        while (_isStreaming)
+        {
+            if (!_sectorUnloadQueue.TryPop(out var sectorPath))
+                await Task.Delay(10);
+
+            if (_activeNodes.TryGetValue(sectorPath, out var nodeList))
+            {
+                foreach (var index in nodeList.Keys)
+                {
+                    _nodeUnloadQueue.Push($"{sectorPath} {index}");
+                }
+            }
+            
+            _activeSectors.TryRemove(sectorPath, out _);
         }
     }
 
