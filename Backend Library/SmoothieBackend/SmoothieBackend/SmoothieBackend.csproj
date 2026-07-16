@@ -6,4 +6,19 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <PropertyGroup>
+        <BlenderAddonDir>F:\dev0\prjk\Smoothie\Blender Addon\lib</BlenderAddonDir>
+    </PropertyGroup>
+    
+    <Target Name="CopyToBlender" AfterTargets="Build">
+        <ItemGroup>
+            <FilesToCopy Include="$(TargetDir)$(AssemblyName).*" />
+        </ItemGroup>
+
+        <Copy
+                SourceFiles="@(FilesToCopy)"
+                DestinationFolder="$(BlenderAddonDir)"
+                SkipUnchangedFiles="true" />
+    </Target>
+    
 </Project>

@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "C# Bridge (pythonnet demo)",
-    "author": "Example",
-    "version": (1, 0, 0),
+    "name": "Smoothie - Cyberpunk 2077 World Editor",
+    "author": "sprt_",
+    "version": (0, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > C# Bridge",
-    "description": "Installs pythonnet and calls a C# library from Blender",
+    "description": "World Editing Plugin for Cyberpunk 2077. Directly integrates into WolvenKit.",
     "category": "Development",
 }
 
@@ -34,6 +34,15 @@ def ensure_vendor_on_path():
 # so `import clr` works anywhere else in the addon without extra wiring.
 ensure_vendor_on_path()
 
+ADDON_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_CONFIG = os.path.join(
+    ADDON_DIR,
+    "lib",
+    "runtimeconfig.json"
+)
+
+from pythonnet import load
+load("coreclr", runtime_config=RUNTIME_CONFIG)
 
 def get_blender_python():
     """Path to Blender's own bundled Python interpreter."""
@@ -84,6 +93,9 @@ def call_csharp_library(dll_path, namespace, class_name, method_name, *args):
     csharp_class = getattr(module, class_name)
     method = getattr(csharp_class, method_name)
 
+    initMethod = getattr(csharp_class, "Initialize")
+    initMethod()
+
     return method(*args)
 
 
@@ -121,19 +133,19 @@ class CSBridgeProps(bpy.types.PropertyGroup):
     dll_path: bpy.props.StringProperty(
         name="DLL Path",
         subtype='FILE_PATH',
-        default=os.path.join(LIB_DIR, "MyLibrary.dll"),
+        default=os.path.join(LIB_DIR, "SmoothieBackend.dll"),
     )
-    namespace: bpy.props.StringProperty(name="Namespace", default="MyLibrary")
-    class_name: bpy.props.StringProperty(name="Class", default="MathHelper")
-    method_name: bpy.props.StringProperty(name="Method", default="Add")
+    namespace: bpy.props.StringProperty(name="Namespace", default="SmoothieBackend.API")
+    class_name: bpy.props.StringProperty(name="Class", default="BlenderAddonAPI")
+    method_name: bpy.props.StringProperty(name="Method", default="GetInt")
 
 
 class CSBRIDGE_PT_panel(bpy.types.Panel):
-    bl_label = "C# Bridge"
-    bl_idname = "CSBRIDGE_PT_panel"
+    bl_label = "Smoothie - Cyberpunk 2077 World Editor"
+    bl_idname = "Smoothie_CP77_WE_PT_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "C# Bridge"
+    bl_category = "Cyberpunk 2077 World Editor"
 
     def draw(self, context):
         layout = self.layout
