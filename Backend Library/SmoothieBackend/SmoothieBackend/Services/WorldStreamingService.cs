@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using SharpDX;
 using SmoothieBackend.Extensions;
 using SmoothieBackend.Models;
@@ -28,7 +29,11 @@ public class WorldStreamingService
     private IProgressService<double> _progressService;
     
     private Vector3 _cameraPosition;
-    private List<SectorDescriptor> _sectorDescriptors = new();
+    private readonly List<SectorDescriptor> _sectorDescriptors = new();
+    
+    private readonly ConcurrentStack<string> _sectorLoadQueue = new();
+    private readonly ConcurrentStack<string> _sectorUnloadQueue = new();
+    private readonly ConcurrentDictionary<string, byte> _activeSectors = new();
     
     public WorldStreamingService()
     {
@@ -65,20 +70,34 @@ public class WorldStreamingService
         Console.WriteLine("Streaming tick with camera: " + _cameraPosition.X + ", " + _cameraPosition.Y + ", " + _cameraPosition.Z + "");
         Console.WriteLine("Sector descriptors: " + _sectorDescriptors.Count);
         CheckSectors();
+
+        while (_sectorLoadQueue.TryPop(out var sectorPath))
+        {
+            Console.WriteLine("Loading sector: " + sectorPath);
+        }
+        
+        while (_sectorUnloadQueue.TryPop(out var sectorPath))
+        {
+            // Console.WriteLine("Unloading sector: " + sectorPath);
+        }
     }
 
     private void CheckSectors()
     {
         var perThreadSectors = _sectorDescriptors.Count / ThreadCount;
-
+        
+        var tasks = new List<Task>();
+        
         for (var i = 0; i < ThreadCount; i++)
         {
             var startIndex = i * perThreadSectors;
             var endIndex = startIndex + perThreadSectors;
             if (i == ThreadCount - 1)
                 endIndex = _sectorDescriptors.Count;
-            Task.Run(() => CheckSectorsInRange(startIndex, endIndex));
+            tasks.Add(Task.Run(() => CheckSectorsInRange(startIndex, endIndex)));
         }
+        
+        Task.WaitAll(tasks);
 
         return;
         
@@ -88,7 +107,21 @@ public class WorldStreamingService
             {
                 var sector = _sectorDescriptors[i];
                 if (sector.BoundingBox.Contains(_cameraPosition) != ContainmentType.Disjoint)
-                    Console.WriteLine("Streaming sector: " + sector.Path);
+                {
+                    if (_activeSectors.ContainsKey(sector.Path))
+                        continue;
+                    
+                    _activeSectors.TryAdd(sector.Path, 0);
+                    _sectorLoadQueue.Push(sector.Path);
+                }
+                else
+                {
+                    if (!_activeSectors.ContainsKey(sector.Path))
+                        continue;
+                    
+                    _activeSectors.TryRemove(sector.Path, out _);
+                    _sectorUnloadQueue.Push(sector.Path);
+                }
             }
         }
     }
