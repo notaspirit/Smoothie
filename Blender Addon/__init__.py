@@ -157,17 +157,22 @@ def on_streaming_tick():
             BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
             break
 
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000):
+    return 1 / 3
+
+bpy.app.timers.register(on_streaming_tick, persistent=True)
+
+def on_apply_streamed_changes_tick():
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(500):
         add_empty(new_node.Id, Vector((new_node.Position.X, new_node.Position.Y, new_node.Position.Z)))
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000):
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(500):
         remove_empty(removed_node)
 
     apply_points()
 
-    return 1 / 3
+    return 1 / 60
 
-bpy.app.timers.register(on_streaming_tick, persistent=True)
+bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
 
 def register():
     print("Registering Smoothie World Editor")
