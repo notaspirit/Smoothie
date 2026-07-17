@@ -66,26 +66,64 @@ def load_clr():
 
     return False
 
+positions = []
+id_to_index = {}
+free_indices = []
+
 def add_empty(id: str, position):
-    if id in tracked_empties:
-        # Already exists, maybe just update its position
-        tracked_empties[id].location = position
-        return
+    if free_indices:
+        index = free_indices.pop()
+        positions[index] = position
+    else:
+        index = len(positions)
+        positions.append(position)
 
-    empty = bpy.data.objects.new(id, None)
-    empty.empty_display_type = 'PLAIN_AXES'
-    bpy.context.collection.objects.link(empty)
-
-    empty.location = position
-
-    tracked_empties[id] = empty
+    id_to_index[id] = index
 
 def remove_empty(id: str):
-    empty = tracked_empties.pop(id, None)
-    if empty is None:
+    index = id_to_index.pop(id, None)
+    if index is None:
         return
 
-    bpy.data.objects.remove(empty, do_unlink=True)
+    positions[index] = Vector((-10000, -10000, -10000))
+    free_indices.append(index)
+
+import bpy
+import gpu
+from gpu_extras.batch import batch_for_shader
+
+shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+
+batch = None
+
+def draw():
+    if batch is None:
+        return
+
+    shader.bind()
+    shader.uniform_float("color", (1, 0, 0, 1))
+    batch.draw(shader)
+
+
+handle = bpy.types.SpaceView3D.draw_handler_add(
+    draw,
+    (),
+    'WINDOW',
+    'POST_VIEW'
+)
+
+def apply_points():
+    global batch
+
+    batch = batch_for_shader(
+        shader,
+        "POINTS",
+        {"pos": positions}
+    )
+
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            area.tag_redraw()
 
 ensure_vendor_on_path()
 if not load_clr():
@@ -110,8 +148,6 @@ BlenderAddonAPI.Initialize()
 
 BlenderAddonAPI.StartStreaming()
 
-tracked_empties: dict[str, bpy.types.Object] = {}
-
 def on_streaming_tick():
     for area in bpy.context.screen.areas:
         if area.type == 'VIEW_3D':
@@ -121,11 +157,13 @@ def on_streaming_tick():
             BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
             break
 
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(300):
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000):
         add_empty(new_node.Id, Vector((new_node.Position.X, new_node.Position.Y, new_node.Position.Z)))
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(300):
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000):
         remove_empty(removed_node)
+
+    apply_points()
 
     return 1 / 3
 
