@@ -32,12 +32,12 @@ public class WorldStreamingService
     private Vector3 _cameraPosition;
     private readonly List<SectorDescriptor> _sectorDescriptors = new();
     
-    private readonly ConcurrentStack<string> _sectorLoadQueue = new();
-    private readonly ConcurrentStack<string> _sectorUnloadQueue = new();
+    private readonly ConcurrentQueue<string> _sectorLoadQueue = new();
+    private readonly ConcurrentQueue<string> _sectorUnloadQueue = new();
     private readonly ConcurrentDictionary<string, byte> _activeSectors = new();
     
-    private readonly ConcurrentStack<Node> _nodeLoadQueue = new();
-    private readonly ConcurrentStack<string> _nodeUnloadQueue = new();
+    private readonly ConcurrentQueue<Node> _nodeLoadQueue = new();
+    private readonly ConcurrentQueue<string> _nodeUnloadQueue = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<int, byte>> _activeNodes = new();
     
     private bool _isStreaming = false;
@@ -88,7 +88,7 @@ public class WorldStreamingService
     public IEnumerable<Node> GetLoadNodesQueue(int count)
     {
         var i = 0;
-        while (i < count && _nodeLoadQueue.TryPop(out var node))
+        while (i < count && _nodeLoadQueue.TryDequeue(out var node))
         {
             if (!_activeNodes.TryGetValue(node.Id.Split(' ')[0], out var nodes))
                 continue;
@@ -104,9 +104,9 @@ public class WorldStreamingService
     public IEnumerable<string> GetUnloadNodesQueue(int count)
     {
         var i = 0;
-        while (i < count && _nodeUnloadQueue.TryPop(out var nodeId))
+        while (i < count && _nodeUnloadQueue.TryDequeue(out var nodeId))
         {
-            if (_activeNodes.ContainsKey(nodeId))
+            if (!_activeNodes.TryGetValue(nodeId.Split(' ')[0], out var nodes) || !nodes.ContainsKey(int.Parse(nodeId.Split(' ')[1])))
                 yield return nodeId;
             else
                 continue;
@@ -144,16 +144,16 @@ public class WorldStreamingService
                     if (_activeSectors.ContainsKey(sector.Path))
                         continue;
                     
-                    _activeSectors.TryAdd(sector.Path, 0);
-                    _sectorLoadQueue.Push(sector.Path);
+                    if (_activeSectors.TryAdd(sector.Path, 0))
+                        _sectorLoadQueue.Enqueue(sector.Path);
                 }
                 else
                 {
                     if (!_activeSectors.ContainsKey(sector.Path))
                         continue;
                     
-                    _activeSectors.TryRemove(sector.Path, out _);
-                    _sectorUnloadQueue.Push(sector.Path);
+                    if (_activeSectors.TryRemove(sector.Path, out _))
+                        _sectorUnloadQueue.Enqueue(sector.Path);
                 }
             }
         }
@@ -163,8 +163,11 @@ public class WorldStreamingService
     {
         while (_isStreaming)
         {
-            if (!_sectorLoadQueue.TryPop(out var sectorPath))
+            if (!_sectorLoadQueue.TryDequeue(out var sectorPath))
+            {
                 await Task.Delay(10);
+                continue;
+            }
             
             var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
             if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } })
@@ -174,24 +177,14 @@ public class WorldStreamingService
             foreach (var node in nodeData)
             {
                 var id = $"{sectorPath} {i}";
-                    
-                if (_activeNodes.ContainsKey(id))
-                    continue;
-                
-                if (_activeNodes.TryGetValue(id, out var nodeList))
-                    nodeList.TryAdd(i, 0);
-                else
-                {
-                    var dict = new ConcurrentDictionary<int, byte>();
-                    dict.TryAdd(i, 0);
-                    _activeNodes.TryAdd(sectorPath, dict);
-                }
-                
-                _nodeLoadQueue.Push(new Node
-                {
-                    Id = id,
-                    Position = node.Position.ToSDX().ToVector3()
-                });
+
+                var nodeList = _activeNodes.GetOrAdd(sectorPath, _ => new ConcurrentDictionary<int, byte>());
+                if (nodeList.TryAdd(i, 0))
+                    _nodeLoadQueue.Enqueue(new Node
+                    {
+                        Id = id,
+                        Position = node.Position.ToSDX().ToVector3()
+                    });
                 
                 i++;
             }
@@ -202,14 +195,17 @@ public class WorldStreamingService
     {
         while (_isStreaming)
         {
-            if (!_sectorUnloadQueue.TryPop(out var sectorPath))
+            if (!_sectorUnloadQueue.TryDequeue(out var sectorPath))
+            {
                 await Task.Delay(10);
+                continue;
+            }
 
-            if (_activeNodes.TryGetValue(sectorPath, out var nodeList))
+            if (_activeNodes.TryRemove(sectorPath, out var nodeList))
             {
                 foreach (var index in nodeList.Keys)
                 {
-                    _nodeUnloadQueue.Push($"{sectorPath} {index}");
+                    _nodeUnloadQueue.Enqueue($"{sectorPath} {index}");
                 }
             }
             
