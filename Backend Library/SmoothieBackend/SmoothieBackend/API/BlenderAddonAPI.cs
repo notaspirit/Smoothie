@@ -41,7 +41,7 @@ public static class BlenderAddonAPI
         return _worldStreamingService.GetLoadNodesQueue(count);
     }
     
-    public static IEnumerable<string> GetUnloadNodesQueue(int count)
+    public static IEnumerable<NodeID> GetUnloadNodesQueue(int count)
     {
         return _worldStreamingService.GetUnloadNodesQueue(count);
     }

@@ -101,7 +101,7 @@ def draw():
         return
 
     shader.bind()
-    shader.uniform_float("color", (1, 0, 0, 1))
+    shader.uniform_float("color", (0, 1, 0, 0.5))
     batch.draw(shader)
 
 
@@ -149,24 +149,33 @@ BlenderAddonAPI.Initialize()
 BlenderAddonAPI.StartStreaming()
 
 def on_streaming_tick():
+    """
     for area in bpy.context.screen.areas:
-        if area.type == 'VIEW_3D':
-            region_3d = area.spaces.active.region_3d
+    if area.type == 'VIEW_3D':
+        region_3d = area.spaces.active.region_3d
 
-            location = region_3d.view_matrix.inverted().translation
-            BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
-            break
+        location = region_3d.view_matrix.inverted().translation
+        BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
+        break
+    :return:
+    """
+
+    cube = bpy.data.objects["Cube"]
+    BlenderAddonAPI.OnStreamingTick(cube.location.x, cube.location.y, cube.location.z)
 
     return 1 / 3
 
 bpy.app.timers.register(on_streaming_tick, persistent=True)
 
-def on_apply_streamed_changes_tick():
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(500):
-        add_empty(new_node.Id, Vector((new_node.Position.X, new_node.Position.Y, new_node.Position.Z)))
+def node_id_to_string(node_id):
+    return "{} {}".format(node_id.ParentSector, str(node_id.Index))
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(500):
-        remove_empty(removed_node)
+def on_apply_streamed_changes_tick():
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(6000):
+        add_empty(node_id_to_string(new_node.Id), Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)))
+
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(6000):
+        remove_empty(node_id_to_string(removed_node))
 
     apply_points()
 

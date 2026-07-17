@@ -4,6 +4,7 @@ namespace SmoothieBackend.Models;
 
 public class Node
 {
-    public string Id { get; set; }
-    public Vector3 Position { get; set; }
+    public NodeID Id { get; set; }
+    public BoundingSphere Position { get; set; }
+    public bool IsStreaming { get; set; }
 }
