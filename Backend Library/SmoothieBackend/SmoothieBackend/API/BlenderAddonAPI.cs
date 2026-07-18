@@ -45,4 +45,14 @@ public static class BlenderAddonAPI
     {
         return _worldStreamingService.GetUnloadNodesQueue(count);
     }
+    
+    public static IEnumerable<BlenderMesh> GetLoadMeshesQueue(int count)
+    {
+        return _worldStreamingService.GetLoadMeshesQueue(count);
+    }
+    
+    public static IEnumerable<string> GetUnloadMeshesQueue(int count)
+    {
+        return _worldStreamingService.GetUnloadMeshesQueue(count);
+    }
 }

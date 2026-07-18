@@ -125,6 +125,63 @@ def apply_points():
         if area.type == 'VIEW_3D':
             area.tag_redraw()
 
+def get_or_create_mesh(name):
+    name = name + "_mesh"
+    obj = bpy.data.objects.get(name)
+    if obj is None:
+        mesh = bpy.data.meshes.new(name)
+        obj = bpy.data.objects.new(name, mesh)
+    return obj
+
+def remove_mesh(name):
+    name = name + "_mesh"
+    return bpy.data.objects.get(name)
+
+import numpy as np
+
+def build_mesh_from_backend(mesh, backend_mesh):
+    mesh.clear_geometry()
+
+    verts = np.asarray(backend_mesh.Vertices, dtype=np.float32)
+    indices = np.asarray(backend_mesh.Indices, dtype=np.uint32)
+
+    num_verts = len(verts) // 3
+    num_loops = len(indices)
+    num_tris = num_loops // 3
+
+    mesh.vertices.add(num_verts)
+    mesh.vertices.foreach_set("co", verts)
+
+    mesh.loops.add(num_loops)
+    mesh.loops.foreach_set("vertex_index", indices)
+
+    mesh.polygons.add(num_tris)
+    loop_start = np.arange(0, num_loops, 3, dtype=np.int32)
+    loop_total = np.full(num_tris, 3, dtype=np.int32)
+    mesh.polygons.foreach_set("loop_start", loop_start)
+    mesh.polygons.foreach_set("loop_total", loop_total)
+
+    mesh.update()
+    mesh.validate()
+
+import random
+
+def assign_random_color_material(mesh, name):
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = (
+        random.random(), random.random(), random.random(), 1.0
+    )
+
+    mat.diffuse_color = bsdf.inputs["Base Color"].default_value
+
+    mesh.materials.clear()
+    mesh.materials.append(mat)
+
 ensure_vendor_on_path()
 if not load_clr():
     python_net_success, msg = ensure_pythonnet()
@@ -144,6 +201,7 @@ clr.AddReference("SmoothieBackend")
 
 from SmoothieBackend.API import BlenderAddonAPI
 from mathutils import Vector
+
 BlenderAddonAPI.Initialize()
 
 BlenderAddonAPI.StartStreaming()
@@ -182,6 +240,27 @@ def on_apply_streamed_changes_tick():
     return 1 / 60
 
 bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
+
+def on_mesh_io_tick():
+    objects_to_link = []
+    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(10):
+        obj = get_or_create_mesh(new_mesh.Path)
+        objects_to_link.append(obj)
+        build_mesh_from_backend(obj.data, new_mesh)
+        assign_random_color_material(obj.data, new_mesh.Path)
+
+    for obj in objects_to_link:
+        bpy.context.collection.objects.link(obj)
+
+    objects_to_remove = []
+    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(10):
+        objects_to_remove.append(remove_mesh(removed_mesh))
+
+    bpy.data.batch_remove(objects_to_remove)
+
+    return 1
+
+bpy.app.timers.register(on_mesh_io_tick, persistent=True)
 
 def register():
     print("Registering Smoothie World Editor")

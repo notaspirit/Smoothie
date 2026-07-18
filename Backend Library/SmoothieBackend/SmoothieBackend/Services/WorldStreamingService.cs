@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using SharpDX;
 using SmoothieBackend.Extensions;
 using SmoothieBackend.Models;
+using SmoothieBackend.Parsers;
 using WolvenKit;
 using WolvenKit.Common;
 using WolvenKit.Common.Services;
@@ -29,7 +30,7 @@ public class WorldStreamingService
     private IHookService _hookService;
     private IProgressService<double> _progressService;
     
-    private Vector3 _cameraPosition;
+    private Vector3 _streamingPoint;
     private readonly List<SectorDescriptor> _sectorDescriptors = new();
     private readonly ConcurrentDictionary<string, Node[]> _loadedSectors = new();
     
@@ -43,12 +44,21 @@ public class WorldStreamingService
     private readonly WorkQueue<NodeID> _blenderNodeLoadQueue = new(false);
     private readonly WorkQueue<NodeID> _blenderNodeUnloadQueue = new(false);
     
+    private readonly ConcurrentDictionary<string, BlenderMesh> _loadedMeshes = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<NodeID, byte>> _activeMeshes = new();
+    
+    private readonly BlockingWorkQueue<string> _meshLoadQueue = new(false);
+    private readonly BlockingWorkQueue<string> _meshUnloadQueue = new(false);
+    
+    private readonly WorkQueue<string> _blenderMeshLoadQueue = new(false);
+    private readonly WorkQueue<string> _blenderMeshUnloadQueue = new(false);
+    
     private bool _isStreaming = false;
     private CancellationTokenSource? _cts = null;
     
     public WorldStreamingService()
     {
-        _cameraPosition = Vector3.Zero;
+        _streamingPoint = Vector3.Zero;
         
         _hashService = new HashService();
         _hookService = new HookService();
@@ -72,6 +82,8 @@ public class WorldStreamingService
             Task.Run(() => LoadSectorFromQueue(_cts.Token));
             Task.Run(() => UnloadSectorFromQueue(_cts.Token));
             Task.Run(() => ProcessNodeStreamingDistances(_cts.Token));
+            Task.Run(() => LoadMeshFromQueue(_cts.Token));
+            Task.Run(() => UnloadMeshFromQueue(_cts.Token));
         }
     }
 
@@ -83,7 +95,7 @@ public class WorldStreamingService
         _cts = null;
     }
     
-    public void Tick(Vector3 cameraPosition)
+    public void Tick(Vector3 streamingPoint)
     {
         Console.WriteLine($"Stats:\n" +
                           $"Sector Descriptors: {_sectorDescriptors.Count}\n" +
@@ -95,20 +107,68 @@ public class WorldStreamingService
                           $"\n" +
                           $"Node Distances Queue: {_processNodeStreamingDistances.Count}\n" +
                           $"\n" +
-                          $"Blender Load Queue: {_blenderNodeLoadQueue.Count}\n" +
-                          $"Blender Unload Queue: {_blenderNodeUnloadQueue.Count}");
+                          $"Blender Node Load Queue: {_blenderNodeLoadQueue.Count}\n" +
+                          $"Blender Node Unload Queue: {_blenderNodeUnloadQueue.Count}\n" +
+                          $"\n" +
+                          $"Active Meshes: {_activeMeshes.Count}\n" +
+                          $"Loaded Meshes: {_loadedMeshes.Count}\n" +
+                          $"\n" +
+                          $"Mesh Load Queue: {_meshLoadQueue.Count}\n" +
+                          $"Mesh Unload Queue: {_meshUnloadQueue.Count}\n" +
+                          $"\n" +
+                          $"Blender Mesh Load Queue: {_blenderMeshLoadQueue.Count}\n" +
+                          $"Blender Mesh Unload Queue: {_blenderMeshUnloadQueue.Count}");
         
-        if (_cameraPosition.Equals(cameraPosition) || !_isStreaming)
+        if (_streamingPoint.Equals(streamingPoint) || !_isStreaming)
             return;
         
-        _cameraPosition = cameraPosition;
-        Console.WriteLine("Streaming tick with camera: " + _cameraPosition.X + ", " + _cameraPosition.Y + ", " + _cameraPosition.Z + "");
+        _streamingPoint = streamingPoint;
+        Console.WriteLine("Streaming tick with point: " + _streamingPoint.X + ", " + _streamingPoint.Y + ", " + _streamingPoint.Z + "");
         CheckSectors();
         
         foreach (var sector in _loadedSectors.Keys)
             _processNodeStreamingDistances.Enqueue(sector);
     }
 
+    #region  Blender Mesh Queue
+    
+    public IEnumerable<BlenderMesh> GetLoadMeshesQueue(int count)
+    {
+        var i = 0;
+        while (i < count && _blenderMeshLoadQueue.TryDequeue(out var meshPath))
+        {
+            if (!_loadedMeshes.TryGetValue(meshPath, out var mesh))
+            {
+                _blenderMeshLoadQueue.Done(meshPath);
+                continue;
+            }
+            
+            i++;
+            _blenderMeshLoadQueue.Done(meshPath);
+            yield return mesh;
+        }
+    }
+    
+    public IEnumerable<string> GetUnloadMeshesQueue(int count)
+    {
+        var i = 0;
+        while (i < count && _blenderMeshUnloadQueue.TryDequeue(out var meshPath))
+        {
+            if (_loadedMeshes.ContainsKey(meshPath) || _activeMeshes.ContainsKey(meshPath))
+            {
+                _blenderMeshUnloadQueue.Done(meshPath);
+            }
+            
+            i++;
+            _blenderMeshUnloadQueue.Done(meshPath);
+            yield return meshPath;
+        }
+    }
+    
+    #endregion
+
+    #region  Blender Node Queue
+    
     public IEnumerable<Node> GetLoadNodesQueue(int count)
     {
         var i = 0;
@@ -158,7 +218,10 @@ public class WorldStreamingService
             yield return nodeId;
         }
     }
-
+    
+    #endregion
+    
+    #region Check Streamingdistances
     private void CheckSectors()
     {
         var perThreadSectors = _sectorDescriptors.Count / ThreadCount;
@@ -183,7 +246,7 @@ public class WorldStreamingService
             for (var i = startIndex; i < endIndex; i++)
             {
                 var sector = _sectorDescriptors[i];
-                if (sector.BoundingBox.Contains(_cameraPosition) != ContainmentType.Disjoint)
+                if (sector.BoundingBox.Contains(_streamingPoint) != ContainmentType.Disjoint)
                 {
                     if (_activeSectors.TryAdd(sector.Path, 0))
                         _sectorLoadQueue.Enqueue(sector.Path);
@@ -209,16 +272,41 @@ public class WorldStreamingService
             foreach (var node in sector)
             {
                 var previous = node.IsStreaming;
-                node.IsStreaming = node.Position.Contains(ref _cameraPosition) != ContainmentType.Disjoint;
+                node.IsStreaming = node.Position.Contains(ref _streamingPoint) != ContainmentType.Disjoint;
                 if (previous != node.IsStreaming && node.IsStreaming)
+                {
+                    if (node.MeshPath is not null)
+                    {
+                        var refs = _activeMeshes.GetOrAdd(node.MeshPath, new ConcurrentDictionary<NodeID, byte>());
+                        refs.TryAdd(node.Id, 0);
+                        if (refs.Count == 1)
+                            _meshLoadQueue.Enqueue(node.MeshPath);
+                    }
                     _blenderNodeLoadQueue.Enqueue(node.Id);
+                }
                 else if (previous != node.IsStreaming && !node.IsStreaming)
+                {
+                    if (node.MeshPath is not null && _activeMeshes.TryGetValue(node.MeshPath, out var refs))
+                    {
+                        refs.TryRemove(node.Id, out _);
+                        if (refs.IsEmpty)
+                        {
+                            _activeMeshes.TryRemove(node.MeshPath, out _);
+                            _meshUnloadQueue.Enqueue(node.MeshPath);
+                        }
+                    }
+                    
                     _blenderNodeUnloadQueue.Enqueue(node.Id);
+                }
             }
             
             _processNodeStreamingDistances.Done(sectorPath);
         }
     }
+    
+    #endregion
+    
+    #region Sector IO
 
     private void LoadSectorFromQueue(CancellationToken ct = default)
     {
@@ -230,7 +318,7 @@ public class WorldStreamingService
                 continue;
             
             var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
-            if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } })
+            if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } sector })
                 continue;
             
             // double-check before adding, since loading can take a while
@@ -242,11 +330,16 @@ public class WorldStreamingService
             var i = 0;
             foreach (var node in nodeData)
             {
+                string? meshPath = null;
+                if (sector.Nodes[node.NodeIndex].Chunk is worldMeshNode meshNode)
+                    meshPath = meshNode.Mesh.DepotPath;
+                
                 nodeList[i] = new Node
                 {
                     Id = new NodeID(sectorPath, i),
                     Position = new BoundingSphere( node.Position.ToSDX().ToVector3(), node.UkFloat1),
-                    IsStreaming = false
+                    IsStreaming = false,
+                    MeshPath = meshPath
                 };
                 
                 i++;
@@ -291,4 +384,49 @@ public class WorldStreamingService
             });
         }
     }
+    
+    #endregion
+
+    #region Mesh IO
+
+    private void LoadMeshFromQueue(CancellationToken ct = default)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var meshPath = _meshLoadQueue.Dequeue(ct);
+
+            if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
+                continue;
+
+            var file = _archiveManager.GetCR2WFile(meshPath);
+            if (file is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob } cmesh })
+                continue;
+            var bMesh = BlenderMeshParser.Parse(cmesh)!;
+            bMesh.Path = meshPath;
+
+            if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
+                continue;
+            
+            _loadedMeshes.TryAdd(meshPath, bMesh);
+            _meshLoadQueue.Done(meshPath);
+            _blenderMeshLoadQueue.Enqueue(meshPath);
+        }
+    }
+    
+    private void UnloadMeshFromQueue(CancellationToken ct = default)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var meshPath = _meshUnloadQueue.Dequeue(ct);
+
+            if (!_loadedMeshes.ContainsKey(meshPath) || _activeMeshes.ContainsKey(meshPath))
+                continue;
+            
+            if (_loadedMeshes.TryRemove(meshPath, out _))
+                _blenderMeshLoadQueue.Enqueue(meshPath);
+            _meshLoadQueue.Done(meshPath);
+        }
+    }
+
+    #endregion
 }
