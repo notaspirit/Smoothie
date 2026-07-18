@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using SharpDX;
 using SmoothieBackend.Extensions;
+using SmoothieBackend.Helpers;
 using SmoothieBackend.Models;
 using SmoothieBackend.Parsers;
 using WolvenKit;
@@ -338,6 +339,8 @@ public class WorldStreamingService
                 {
                     Id = new NodeID(sectorPath, i),
                     Position = new BoundingSphere( node.Position.ToSDX().ToVector3(), node.UkFloat1),
+                    Scale = node.Scale.ToSDX(),
+                    Rotation = node.Orientation.ToEulerAnglesRadian(),
                     IsStreaming = false,
                     MeshPath = meshPath
                 };

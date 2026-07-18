@@ -182,6 +182,134 @@ def assign_random_color_material(mesh, name):
     mesh.materials.clear()
     mesh.materials.append(mat)
 
+def get_or_create_collection(name):
+    coll = bpy.data.collections.get(name)
+    if coll is None:
+        coll = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(coll)
+    return coll
+
+import uuid
+
+mesh_path_lib_name_map = {}
+lib_free_indices = []
+
+POOL_SIZE = 8000
+
+def init_mesh_pool():
+    coll = get_or_create_collection("MeshLibrary")
+    for i in range(POOL_SIZE):
+        name = f"MeshSource_{i}"
+        if name not in bpy.data.objects:
+            mesh = bpy.data.meshes.new(name + "_mesh")
+            obj = bpy.data.objects.new(name, mesh)
+            coll.objects.link(obj)
+
+        slot_id = uuid.uuid4()
+        mesh_path_lib_name_map[slot_id] = name
+        lib_free_indices.append(slot_id)
+
+def init_point_cloud():
+    name = "StreamedPoints"
+    if name in bpy.data.objects:
+        return bpy.data.objects[name]
+
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+def init_instancing_tree(points_obj):
+    mod = points_obj.modifiers.new("Streamed Instances", 'NODES')
+    tree = bpy.data.node_groups.new("StreamedInstancesTree", 'GeometryNodeTree')
+    mod.node_group = tree
+
+    tree.interface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+    tree.interface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+    nodes, links = tree.nodes, tree.links
+    nodes.clear()
+
+    group_in  = nodes.new("NodeGroupInput");  group_in.location  = (-900, 0)
+    group_out = nodes.new("NodeGroupOutput"); group_out.location = (700, 0)
+
+    # Reads all objects in MeshLibrary as a flat list of instance-able
+    # geometries. Separate Children = True is what lets Pick Instance
+    # address them individually by index, rather than treating the whole
+    # collection as one blob.
+    coll_info = nodes.new("GeometryNodeCollectionInfo")
+    coll_info.inputs["Collection"].default_value = bpy.data.collections["MeshLibrary"]
+    coll_info.transform_space = 'RELATIVE'
+    coll_info.inputs["Separate Children"].default_value = True
+    coll_info.location = (-900, -250)
+
+    idx_attr = nodes.new("GeometryNodeInputNamedAttribute")
+    idx_attr.data_type = 'INT'
+    idx_attr.inputs["Name"].default_value = "mesh_index"
+    idx_attr.location = (-900, -450)
+
+    rot_attr = nodes.new("GeometryNodeInputNamedAttribute")
+    rot_attr.data_type = 'FLOAT_VECTOR'
+    rot_attr.inputs["Name"].default_value = "inst_rotation"
+    rot_attr.location = (-900, -650)
+
+    scale_attr = nodes.new("GeometryNodeInputNamedAttribute")
+    scale_attr.data_type = 'FLOAT_VECTOR'
+    scale_attr.inputs["Name"].default_value = "inst_scale"
+    scale_attr.location = (-900, -850)
+
+    instance = nodes.new("GeometryNodeInstanceOnPoints")
+    instance.inputs["Pick Instance"].default_value = True
+    instance.location = (0, 0)
+
+    links.new(group_in.outputs["Geometry"], instance.inputs["Points"])
+    links.new(coll_info.outputs["Instances"], instance.inputs["Instance"])
+    links.new(idx_attr.outputs["Attribute"], instance.inputs["Instance Index"])
+    links.new(rot_attr.outputs["Attribute"], instance.inputs["Rotation"])
+    links.new(scale_attr.outputs["Attribute"], instance.inputs["Scale"])
+    links.new(instance.outputs["Instances"], group_out.inputs["Geometry"])
+
+    return tree
+
+def get_or_create_lib_name(mesh_path: str):
+    try:
+        return mesh_path_lib_name_map[mesh_path]
+    except KeyError:
+        if not lib_free_indices:
+            print("WARNING: Ran out of pool size, cannot stream in mesh with path: " + mesh_path)
+            return None
+        slot_id = lib_free_indices.pop()
+        lib_name = mesh_path_lib_name_map[slot_id]
+        del mesh_path_lib_name_map[slot_id]
+        mesh_path_lib_name_map[mesh_path] = lib_name
+        return lib_name
+
+def stream_in_mesh(backend_mesh):
+    lib_name = get_or_create_lib_name(backend_mesh.Path)
+    if lib_name is None:
+        return
+
+    obj = bpy.data.objects[lib_name]
+    build_mesh_from_backend(obj.data, backend_mesh)
+    assign_random_color_material(obj.data, backend_mesh.Path)
+
+def stream_out_mesh(mesh_path: str):
+    try:
+        lib_name = mesh_path_lib_name_map[mesh_path]
+    except KeyError:
+        return
+
+    obj = bpy.data.objects[lib_name]
+    obj.data.clear_geometry()
+
+    del mesh_path_lib_name_map[mesh_path]
+    slot_id = uuid.uuid4()
+    mesh_path_lib_name_map[slot_id] = lib_name
+    lib_free_indices.append(slot_id)
+
+def index_from_lib_name(lib_name):
+    return int(lib_name.rsplit("_", 1)[1])
+
 ensure_vendor_on_path()
 if not load_clr():
     python_net_success, msg = ensure_pythonnet()
@@ -202,10 +330,6 @@ clr.AddReference("SmoothieBackend")
 from SmoothieBackend.API import BlenderAddonAPI
 from mathutils import Vector
 
-BlenderAddonAPI.Initialize()
-
-BlenderAddonAPI.StartStreaming()
-
 def on_streaming_tick():
     """
     for area in bpy.context.screen.areas:
@@ -223,8 +347,6 @@ def on_streaming_tick():
 
     return 1 / 3
 
-bpy.app.timers.register(on_streaming_tick, persistent=True)
-
 def node_id_to_string(node_id):
     return "{} {}".format(node_id.ParentSector, str(node_id.Index))
 
@@ -239,31 +361,27 @@ def on_apply_streamed_changes_tick():
 
     return 1 / 60
 
-bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
-
 def on_mesh_io_tick():
-    objects_to_link = []
     for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(10):
-        obj = get_or_create_mesh(new_mesh.Path)
-        objects_to_link.append(obj)
-        build_mesh_from_backend(obj.data, new_mesh)
-        assign_random_color_material(obj.data, new_mesh.Path)
+        stream_in_mesh(new_mesh)
 
-    for obj in objects_to_link:
-        bpy.context.collection.objects.link(obj)
-
-    objects_to_remove = []
     for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(10):
-        objects_to_remove.append(remove_mesh(removed_mesh))
-
-    bpy.data.batch_remove(objects_to_remove)
+        stream_out_mesh(removed_mesh.Path)
 
     return 1
 
-bpy.app.timers.register(on_mesh_io_tick, persistent=True)
+def init_streaming():
+    BlenderAddonAPI.Initialize()
+    init_mesh_pool()
+    BlenderAddonAPI.StartStreaming()
+
+    bpy.app.timers.register(on_streaming_tick, persistent=True)
+    bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
+    bpy.app.timers.register(on_mesh_io_tick, persistent=True)
 
 def register():
     print("Registering Smoothie World Editor")
+    bpy.app.timers.register(init_streaming, first_interval=0.1)
 
 
 def unregister():
