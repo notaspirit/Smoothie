@@ -191,6 +191,8 @@ def get_or_create_collection(name):
 
 import uuid
 
+point_cloud_obj = None
+
 mesh_path_lib_name_map = {}
 lib_free_indices = []
 
@@ -203,6 +205,7 @@ def init_mesh_pool():
         if name not in bpy.data.objects:
             mesh = bpy.data.meshes.new(name + "_mesh")
             obj = bpy.data.objects.new(name, mesh)
+            # obj.location = (1e6, 1e6, 1e6)
             coll.objects.link(obj)
 
         slot_id = uuid.uuid4()
@@ -310,6 +313,60 @@ def stream_out_mesh(mesh_path: str):
 def index_from_lib_name(lib_name):
     return int(lib_name.rsplit("_", 1)[1])
 
+import numpy as np
+
+next_index = 0
+
+def _ensure_vertex_count(mesh, count):
+    """Grows the mesh's vertex array if we need a new slot; never shrinks."""
+    if len(mesh.vertices) < count:
+        mesh.vertices.add(count - len(mesh.vertices))
+
+
+def _ensure_attributes(mesh):
+    if "inst_rotation" not in mesh.attributes:
+        mesh.attributes.new("inst_rotation", 'FLOAT_VECTOR', 'POINT')
+    if "inst_scale" not in mesh.attributes:
+        mesh.attributes.new("inst_scale", 'FLOAT_VECTOR', 'POINT')
+    if "mesh_index" not in mesh.attributes:
+        mesh.attributes.new("mesh_index", 'INT', 'POINT')
+
+
+def add_node(id: str, position, rotation_euler, scale, mesh_index: int):
+    global next_index
+    mesh = point_cloud_obj.data
+    _ensure_attributes(mesh)
+
+    if free_indices:
+        index = free_indices.pop()          # reuse a previously-removed slot
+    else:
+        index = next_index                  # brand new slot
+        next_index += 1
+        _ensure_vertex_count(mesh, next_index)
+
+    id_to_index[id] = index
+
+    mesh.vertices[index].co = position
+    mesh.attributes["inst_rotation"].data[index].vector = rotation_euler
+    mesh.attributes["inst_scale"].data[index].vector = scale
+    mesh.attributes["mesh_index"].data[index].value = mesh_index
+
+    mesh.update()
+
+
+def remove_node(id: str):
+    index = id_to_index.pop(id, None)
+    if index is None:
+        return
+
+    mesh = point_cloud_obj.data
+    # Zero scale = renders nothing, regardless of mesh_index/position -
+    # avoids relying on an out-of-bounds position or a "safe" mesh index.
+    mesh.attributes["inst_scale"].data[index].vector = (0.0, 0.0, 0.0)
+
+    free_indices.append(index)
+    mesh.update()
+
 ensure_vendor_on_path()
 if not load_clr():
     python_net_success, msg = ensure_pythonnet()
@@ -328,7 +385,7 @@ if LIB_DIR not in sys.path:
 clr.AddReference("SmoothieBackend")
 
 from SmoothieBackend.API import BlenderAddonAPI
-from mathutils import Vector
+from mathutils import Vector, Euler
 
 def on_streaming_tick():
     """
@@ -351,28 +408,41 @@ def node_id_to_string(node_id):
     return "{} {}".format(node_id.ParentSector, str(node_id.Index))
 
 def on_apply_streamed_changes_tick():
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(6000):
-        add_empty(node_id_to_string(new_node.Id), Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)))
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000):
+        if not new_node.MeshPath:
+            continue
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(6000):
-        remove_empty(node_id_to_string(removed_node))
+        # add_empty(node_id_to_string(new_node.Id), Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)))
+        add_node(node_id_to_string(new_node.Id),
+                 Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
+                 Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
+                 Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
+                 index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
 
-    apply_points()
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000):
+        remove_node(node_id_to_string(removed_node))
+
+    # apply_points()
 
     return 1 / 60
 
 def on_mesh_io_tick():
-    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(10):
+    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(1):
         stream_in_mesh(new_mesh)
 
-    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(10):
+    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(1):
         stream_out_mesh(removed_mesh.Path)
 
-    return 1
+    return 1 / 10
 
 def init_streaming():
+    global point_cloud_obj
     BlenderAddonAPI.Initialize()
     init_mesh_pool()
+
+    point_cloud_obj = init_point_cloud()
+    init_instancing_tree(point_cloud_obj)
+
     BlenderAddonAPI.StartStreaming()
 
     bpy.app.timers.register(on_streaming_tick, persistent=True)

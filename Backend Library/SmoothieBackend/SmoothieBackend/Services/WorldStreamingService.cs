@@ -45,7 +45,7 @@ public class WorldStreamingService
     private readonly WorkQueue<NodeID> _blenderNodeLoadQueue = new(false);
     private readonly WorkQueue<NodeID> _blenderNodeUnloadQueue = new(false);
     
-    private readonly ConcurrentDictionary<string, BlenderMesh> _loadedMeshes = new();
+    private readonly ConcurrentDictionary<string, BlenderMesh?> _loadedMeshes = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<NodeID, byte>> _activeMeshes = new();
     
     private readonly BlockingWorkQueue<string> _meshLoadQueue = new(false);
@@ -138,7 +138,7 @@ public class WorldStreamingService
         var i = 0;
         while (i < count && _blenderMeshLoadQueue.TryDequeue(out var meshPath))
         {
-            if (!_loadedMeshes.TryGetValue(meshPath, out var mesh))
+            if (!_loadedMeshes.TryGetValue(meshPath, out var mesh) || mesh is null)
             {
                 _blenderMeshLoadQueue.Done(meshPath);
                 continue;
@@ -146,6 +146,7 @@ public class WorldStreamingService
             
             i++;
             _blenderMeshLoadQueue.Done(meshPath);
+            _loadedMeshes[meshPath] = null;
             yield return mesh;
         }
     }
@@ -158,6 +159,7 @@ public class WorldStreamingService
             if (_loadedMeshes.ContainsKey(meshPath) || _activeMeshes.ContainsKey(meshPath))
             {
                 _blenderMeshUnloadQueue.Done(meshPath);
+                continue;
             }
             
             i++;
@@ -274,6 +276,10 @@ public class WorldStreamingService
             {
                 var previous = node.IsStreaming;
                 node.IsStreaming = node.Position.Contains(ref _streamingPoint) != ContainmentType.Disjoint;
+                
+                if (node is { IsStreaming: true, NearAutoHide: not null })
+                    node.IsStreaming = node.NearAutoHide?.Contains(ref _streamingPoint) == ContainmentType.Disjoint;
+                
                 if (previous != node.IsStreaming && node.IsStreaming)
                 {
                     if (node.MeshPath is not null)
@@ -332,13 +338,20 @@ public class WorldStreamingService
             foreach (var node in nodeData)
             {
                 string? meshPath = null;
+                BoundingSphere? nearAutoHide = null;
                 if (sector.Nodes[node.NodeIndex].Chunk is worldMeshNode meshNode)
                     meshPath = meshNode.Mesh.DepotPath;
+
+                if (sector.Nodes[node.NodeIndex].Chunk is worldGenericProxyMeshNode proxyMesh)
+                    nearAutoHide =
+                        new BoundingSphere(node.Position.ToSDX().ToVector3(), proxyMesh.NearAutoHideDistance);
+
                 
                 nodeList[i] = new Node
                 {
                     Id = new NodeID(sectorPath, i),
                     Position = new BoundingSphere( node.Position.ToSDX().ToVector3(), node.UkFloat1),
+                    NearAutoHide = nearAutoHide,
                     Scale = node.Scale.ToSDX(),
                     Rotation = node.Orientation.ToEulerAnglesRadian(),
                     IsStreaming = false,

@@ -1,4 +1,5 @@
 using WolvenKit.RED4.Types;
+using EulerAngles = SmoothieBackend.Models.EulerAngles;
 
 namespace SmoothieBackend.Helpers;
 
