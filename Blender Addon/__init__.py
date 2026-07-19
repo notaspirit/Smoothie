@@ -162,7 +162,6 @@ def build_mesh_from_backend(mesh, backend_mesh):
     mesh.polygons.foreach_set("loop_total", loop_total)
 
     mesh.update()
-    mesh.validate()
 
 import random
 
@@ -294,7 +293,7 @@ def stream_in_mesh(backend_mesh):
 
     obj = bpy.data.objects[lib_name]
     build_mesh_from_backend(obj.data, backend_mesh)
-    assign_random_color_material(obj.data, backend_mesh.Path)
+    # assign_random_color_material(obj.data, backend_mesh.Path)
 
 def stream_out_mesh(mesh_path: str):
     try:
@@ -351,9 +350,6 @@ def add_node(id: str, position, rotation_euler, scale, mesh_index: int):
     mesh.attributes["inst_scale"].data[index].vector = scale
     mesh.attributes["mesh_index"].data[index].value = mesh_index
 
-    mesh.update()
-
-
 def remove_node(id: str):
     index = id_to_index.pop(id, None)
     if index is None:
@@ -365,7 +361,6 @@ def remove_node(id: str):
     mesh.attributes["inst_scale"].data[index].vector = (0.0, 0.0, 0.0)
 
     free_indices.append(index)
-    mesh.update()
 
 ensure_vendor_on_path()
 if not load_clr():
@@ -407,33 +402,30 @@ def on_streaming_tick():
 def node_id_to_string(node_id):
     return "{} {}".format(node_id.ParentSector, str(node_id.Index))
 
+import time
+
 def on_apply_streamed_changes_tick():
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000):
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(4000):
         if not new_node.MeshPath:
             continue
-
-        # add_empty(node_id_to_string(new_node.Id), Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)))
         add_node(node_id_to_string(new_node.Id),
                  Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
                  Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
                  Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
                  index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000):
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(4000):
         remove_node(node_id_to_string(removed_node))
 
-    # apply_points()
+    point_cloud_obj.data.update()
 
-    return 1 / 60
-
-def on_mesh_io_tick():
-    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(1):
+    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(200):
         stream_in_mesh(new_mesh)
 
-    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(1):
+    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(200):
         stream_out_mesh(removed_mesh.Path)
 
-    return 1 / 10
+    return 2
 
 def init_streaming():
     global point_cloud_obj
@@ -447,7 +439,6 @@ def init_streaming():
 
     bpy.app.timers.register(on_streaming_tick, persistent=True)
     bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
-    bpy.app.timers.register(on_mesh_io_tick, persistent=True)
 
 def register():
     print("Registering Smoothie World Editor")
