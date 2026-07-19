@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Smoothie - Cyberpunk 2077 World Editor",
-    "author": "sprt_",
+    "author": "",
     "version": (0, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > C# Bridge",
@@ -66,64 +66,22 @@ def load_clr():
 
     return False
 
-positions = []
-id_to_index = {}
-free_indices = []
 
-def add_empty(id: str, position):
-    if free_indices:
-        index = free_indices.pop()
-        positions[index] = position
-    else:
-        index = len(positions)
-        positions.append(position)
+def get_or_create_collection(name, hide=False):
+    """Get (or create) a top-level collection, and set its hide flags.
 
-    id_to_index[id] = index
+    Collection-level hide_viewport/hide_render let us hide an entire group
+    of objects (e.g. the master mesh library) independently of any other
+    collection, without touching individual objects.
+    """
+    coll = bpy.data.collections.get(name)
+    if coll is None:
+        coll = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(coll)
+    coll.hide_viewport = hide
+    coll.hide_render = hide
+    return coll
 
-def remove_empty(id: str):
-    index = id_to_index.pop(id, None)
-    if index is None:
-        return
-
-    positions[index] = Vector((-10000, -10000, -10000))
-    free_indices.append(index)
-
-import bpy
-import gpu
-from gpu_extras.batch import batch_for_shader
-
-shader = gpu.shader.from_builtin("UNIFORM_COLOR")
-
-batch = None
-
-def draw():
-    if batch is None:
-        return
-
-    shader.bind()
-    shader.uniform_float("color", (0, 1, 0, 0.5))
-    batch.draw(shader)
-
-
-handle = bpy.types.SpaceView3D.draw_handler_add(
-    draw,
-    (),
-    'WINDOW',
-    'POST_VIEW'
-)
-
-def apply_points():
-    global batch
-
-    batch = batch_for_shader(
-        shader,
-        "POINTS",
-        {"pos": positions}
-    )
-
-    for area in bpy.context.screen.areas:
-        if area.type == 'VIEW_3D':
-            area.tag_redraw()
 
 def get_or_create_mesh(name):
     name = name + "_mesh"
@@ -181,110 +139,52 @@ def assign_random_color_material(mesh, name):
     mesh.materials.clear()
     mesh.materials.append(mat)
 
-def get_or_create_collection(name):
-    coll = bpy.data.collections.get(name)
-    if coll is None:
-        coll = bpy.data.collections.new(name)
-        bpy.context.scene.collection.children.link(coll)
-    return coll
 
-import uuid
+# --- Master mesh pool ---------------------------------------------------
+# "MeshSource_i" objects are never rendered directly - they just hold the
+# actual mesh geometry (streamed in/out by stream_in_mesh/stream_out_mesh)
+# that real instance objects point their .data at. Kept in their own
+# collection so they can be hidden as a group. The pool grows on demand
+# (no precreated/fixed-size set of objects) and freed slots are reused.
 
-point_cloud_obj = None
+MESH_LIBRARY_COLLECTION = "MeshLibrary"
 
-mesh_path_lib_name_map = {}
-lib_free_indices = []
+mesh_path_lib_name_map = {}  # mesh_path -> lib_name (object name)
+lib_free_indices = []        # lib_names available for reuse
+_next_lib_index = 0
 
-POOL_SIZE = 8000
 
 def init_mesh_pool():
-    coll = get_or_create_collection("MeshLibrary")
-    for i in range(POOL_SIZE):
-        name = f"MeshSource_{i}"
-        if name not in bpy.data.objects:
-            mesh = bpy.data.meshes.new(name + "_mesh")
-            obj = bpy.data.objects.new(name, mesh)
-            # obj.location = (1e6, 1e6, 1e6)
-            coll.objects.link(obj)
+    # Just ensure the (hidden) collection exists; objects are created
+    # lazily as meshes actually stream in.
+    get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
 
-        slot_id = uuid.uuid4()
-        mesh_path_lib_name_map[slot_id] = name
-        lib_free_indices.append(slot_id)
 
-def init_point_cloud():
-    name = "StreamedPoints"
-    if name in bpy.data.objects:
-        return bpy.data.objects[name]
+def _create_master_mesh_object():
+    global _next_lib_index
+    name = f"MeshSource_{_next_lib_index}"
+    _next_lib_index += 1
 
     mesh = bpy.data.meshes.new(name + "_mesh")
     obj = bpy.data.objects.new(name, mesh)
-    bpy.context.scene.collection.objects.link(obj)
-    return obj
 
-def init_instancing_tree(points_obj):
-    mod = points_obj.modifiers.new("Streamed Instances", 'NODES')
-    tree = bpy.data.node_groups.new("StreamedInstancesTree", 'GeometryNodeTree')
-    mod.node_group = tree
+    coll = get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
+    coll.objects.link(obj)
 
-    tree.interface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
-    tree.interface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    return name
 
-    nodes, links = tree.nodes, tree.links
-    nodes.clear()
-
-    group_in  = nodes.new("NodeGroupInput");  group_in.location  = (-900, 0)
-    group_out = nodes.new("NodeGroupOutput"); group_out.location = (700, 0)
-
-    # Reads all objects in MeshLibrary as a flat list of instance-able
-    # geometries. Separate Children = True is what lets Pick Instance
-    # address them individually by index, rather than treating the whole
-    # collection as one blob.
-    coll_info = nodes.new("GeometryNodeCollectionInfo")
-    coll_info.inputs["Collection"].default_value = bpy.data.collections["MeshLibrary"]
-    coll_info.transform_space = 'RELATIVE'
-    coll_info.inputs["Separate Children"].default_value = True
-    coll_info.location = (-900, -250)
-
-    idx_attr = nodes.new("GeometryNodeInputNamedAttribute")
-    idx_attr.data_type = 'INT'
-    idx_attr.inputs["Name"].default_value = "mesh_index"
-    idx_attr.location = (-900, -450)
-
-    rot_attr = nodes.new("GeometryNodeInputNamedAttribute")
-    rot_attr.data_type = 'FLOAT_VECTOR'
-    rot_attr.inputs["Name"].default_value = "inst_rotation"
-    rot_attr.location = (-900, -650)
-
-    scale_attr = nodes.new("GeometryNodeInputNamedAttribute")
-    scale_attr.data_type = 'FLOAT_VECTOR'
-    scale_attr.inputs["Name"].default_value = "inst_scale"
-    scale_attr.location = (-900, -850)
-
-    instance = nodes.new("GeometryNodeInstanceOnPoints")
-    instance.inputs["Pick Instance"].default_value = True
-    instance.location = (0, 0)
-
-    links.new(group_in.outputs["Geometry"], instance.inputs["Points"])
-    links.new(coll_info.outputs["Instances"], instance.inputs["Instance"])
-    links.new(idx_attr.outputs["Attribute"], instance.inputs["Instance Index"])
-    links.new(rot_attr.outputs["Attribute"], instance.inputs["Rotation"])
-    links.new(scale_attr.outputs["Attribute"], instance.inputs["Scale"])
-    links.new(instance.outputs["Instances"], group_out.inputs["Geometry"])
-
-    return tree
 
 def get_or_create_lib_name(mesh_path: str):
     try:
         return mesh_path_lib_name_map[mesh_path]
     except KeyError:
-        if not lib_free_indices:
-            print("WARNING: Ran out of pool size, cannot stream in mesh with path: " + mesh_path)
-            return None
-        slot_id = lib_free_indices.pop()
-        lib_name = mesh_path_lib_name_map[slot_id]
-        del mesh_path_lib_name_map[slot_id]
+        if lib_free_indices:
+            lib_name = lib_free_indices.pop()
+        else:
+            lib_name = _create_master_mesh_object()
         mesh_path_lib_name_map[mesh_path] = lib_name
         return lib_name
+
 
 def stream_in_mesh(backend_mesh):
     lib_name = get_or_create_lib_name(backend_mesh.Path)
@@ -294,6 +194,7 @@ def stream_in_mesh(backend_mesh):
     obj = bpy.data.objects[lib_name]
     build_mesh_from_backend(obj.data, backend_mesh)
     # assign_random_color_material(obj.data, backend_mesh.Path)
+
 
 def stream_out_mesh(mesh_path: str):
     try:
@@ -305,62 +206,75 @@ def stream_out_mesh(mesh_path: str):
     obj.data.clear_geometry()
 
     del mesh_path_lib_name_map[mesh_path]
-    slot_id = uuid.uuid4()
-    mesh_path_lib_name_map[slot_id] = lib_name
-    lib_free_indices.append(slot_id)
-
-def index_from_lib_name(lib_name):
-    return int(lib_name.rsplit("_", 1)[1])
-
-import numpy as np
-
-next_index = 0
-
-def _ensure_vertex_count(mesh, count):
-    """Grows the mesh's vertex array if we need a new slot; never shrinks."""
-    if len(mesh.vertices) < count:
-        mesh.vertices.add(count - len(mesh.vertices))
+    lib_free_indices.append(lib_name)
 
 
-def _ensure_attributes(mesh):
-    if "inst_rotation" not in mesh.attributes:
-        mesh.attributes.new("inst_rotation", 'FLOAT_VECTOR', 'POINT')
-    if "inst_scale" not in mesh.attributes:
-        mesh.attributes.new("inst_scale", 'FLOAT_VECTOR', 'POINT')
-    if "mesh_index" not in mesh.attributes:
-        mesh.attributes.new("mesh_index", 'INT', 'POINT')
+# --- Streamed node instances ---------------------------------------------
+# Each streamed-in node becomes a real Blender object living in its own
+# visible collection. Its .data is pointed at whichever MeshLibrary object
+# currently backs its MeshPath, so it behaves like a linked duplicate: no
+# geometry copy, and it updates automatically whenever the master mesh's
+# geometry is rebuilt by stream_in_mesh/stream_out_mesh.
+
+STREAMED_INSTANCES_COLLECTION = "StreamedInstances"
+
+instance_objs = []   # pool of real instance objects, grown on demand
+id_to_index = {}     # node id (string) -> index into instance_objs
+free_indices = []    # indices into instance_objs that are free for reuse
 
 
-def add_node(id: str, position, rotation_euler, scale, mesh_index: int):
-    global next_index
-    mesh = point_cloud_obj.data
-    _ensure_attributes(mesh)
+def _create_instance_object():
+    coll = get_or_create_collection(STREAMED_INSTANCES_COLLECTION, hide=False)
 
+    index = len(instance_objs)
+    name = f"NodeInstance_{index}"
+
+    # Placeholder mesh so the object is type 'MESH'; its .data will be
+    # replaced with a shared master mesh the first time it's used, and
+    # only ever reused/reassigned after that (this placeholder is only
+    # created once per pool growth).
+    placeholder = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, placeholder)
+    obj.hide_viewport = True
+    obj.hide_render = True
+    coll.objects.link(obj)
+
+    instance_objs.append(obj)
+    return index, obj
+
+
+def _get_free_instance_object():
     if free_indices:
-        index = free_indices.pop()          # reuse a previously-removed slot
-    else:
-        index = next_index                  # brand new slot
-        next_index += 1
-        _ensure_vertex_count(mesh, next_index)
+        index = free_indices.pop()
+        return index, instance_objs[index]
+    return _create_instance_object()
 
+
+def add_node(id: str, position, rotation_euler, scale, lib_name: str):
+    index, obj = _get_free_instance_object()
     id_to_index[id] = index
 
-    mesh.vertices[index].co = position
-    mesh.attributes["inst_rotation"].data[index].vector = rotation_euler
-    mesh.attributes["inst_scale"].data[index].vector = scale
-    mesh.attributes["mesh_index"].data[index].value = mesh_index
+    master_obj = bpy.data.objects.get(lib_name)
+    if master_obj is not None:
+        obj.data = master_obj.data
+
+    obj.location = position
+    obj.rotation_euler = rotation_euler
+    obj.scale = scale
+    obj.hide_viewport = False
+    obj.hide_render = False
+
 
 def remove_node(id: str):
     index = id_to_index.pop(id, None)
     if index is None:
         return
 
-    mesh = point_cloud_obj.data
-    # Zero scale = renders nothing, regardless of mesh_index/position -
-    # avoids relying on an out-of-bounds position or a "safe" mesh index.
-    mesh.attributes["inst_scale"].data[index].vector = (0.0, 0.0, 0.0)
-
+    obj = instance_objs[index]
+    obj.hide_viewport = True
+    obj.hide_render = True
     free_indices.append(index)
+
 
 ensure_vendor_on_path()
 if not load_clr():
@@ -405,35 +319,34 @@ def node_id_to_string(node_id):
 import time
 
 def on_apply_streamed_changes_tick():
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(4000):
+    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000000):
         if not new_node.MeshPath:
             continue
+
+        lib_name = get_or_create_lib_name(new_node.MeshPath)
+        if lib_name is None:
+            continue
+
         add_node(node_id_to_string(new_node.Id),
                  Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
                  Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
                  Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
-                 index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
+                 lib_name)
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(4000):
+    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000000):
         remove_node(node_id_to_string(removed_node))
 
-    point_cloud_obj.data.update()
-
-    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(200):
+    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(1000000):
         stream_in_mesh(new_mesh)
 
-    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(200):
+    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(1000000):
         stream_out_mesh(removed_mesh.Path)
 
-    return 2
+    return 10
 
 def init_streaming():
-    global point_cloud_obj
     BlenderAddonAPI.Initialize()
     init_mesh_pool()
-
-    point_cloud_obj = init_point_cloud()
-    init_instancing_tree(point_cloud_obj)
 
     BlenderAddonAPI.StartStreaming()
 
