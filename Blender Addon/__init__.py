@@ -3,7 +3,7 @@ bl_info = {
     "author": "",
     "version": (0, 1, 0),
     "blender": (5, 0, 0),
-    "location": "View3D > Sidebar > C# Bridge",
+    "location": "View3D > Sidebar > Smoothie",
     "description": "World Editing Plugin for Cyberpunk 2077. Directly integrates into WolvenKit.",
     "category": "Development",
 }
@@ -57,14 +57,19 @@ def ensure_pythonnet():
 
 def load_clr():
     """Loads the clr with the runtime config."""
+    # If clr is already importable, the runtime was already loaded in this
+    # process (e.g. addon disable/enable cycle) - coreclr can only be
+    # initialized once per process, so just confirm it's usable.
     try:
         from pythonnet import load
         load("coreclr", runtime_config=RUNTIME_CONFIG)
+        import clr  # noqa: F401
         return True
     except ImportError:
-        pass
-
-    return False
+        return False
+    except Exception as e:
+        print(f"[Smoothie] Failed to load CoreCLR runtime: {e}")
+        return False
 
 
 def get_or_create_collection(name, hide=False):
@@ -81,19 +86,6 @@ def get_or_create_collection(name, hide=False):
     coll.hide_viewport = hide
     coll.hide_render = hide
     return coll
-
-
-def get_or_create_mesh(name):
-    name = name + "_mesh"
-    obj = bpy.data.objects.get(name)
-    if obj is None:
-        mesh = bpy.data.meshes.new(name)
-        obj = bpy.data.objects.new(name, mesh)
-    return obj
-
-def remove_mesh(name):
-    name = name + "_mesh"
-    return bpy.data.objects.get(name)
 
 import numpy as np
 
@@ -119,7 +111,14 @@ def build_mesh_from_backend(mesh, backend_mesh):
     mesh.polygons.foreach_set("loop_start", loop_start)
     mesh.polygons.foreach_set("loop_total", loop_total)
 
-    mesh.update()
+    # calc_edges=True is required here: since we built loops/polygons
+    # manually (no edges array), Blender needs to derive edge data itself,
+    # otherwise the mesh has faces but no edges (breaks edit mode, many
+    # modifiers, etc).
+    mesh.update(calc_edges=True)
+    # Defensive: streamed data can be malformed; validate() will silently
+    # repair/report issues instead of Blender crashing on bad geometry.
+    mesh.validate(verbose=False)
 
 import random
 
@@ -139,124 +138,58 @@ def assign_random_color_material(mesh, name):
     mesh.materials.clear()
     mesh.materials.append(mat)
 
-
-# --- Master mesh pool ---------------------------------------------------
-# "MeshSource_i" objects are never rendered directly - they just hold the
-# actual mesh geometry (streamed in/out by stream_in_mesh/stream_out_mesh)
-# that real instance objects point their .data at. Kept in their own
-# collection so they can be hidden as a group. The pool grows on demand
-# (no precreated/fixed-size set of objects) and freed slots are reused.
-
-MESH_LIBRARY_COLLECTION = "MeshLibrary"
-
-mesh_path_lib_name_map = {}  # mesh_path -> lib_name (object name)
-lib_free_indices = []        # lib_names available for reuse
-_next_lib_index = 0
+MESH_LIBRARY_COLLECTION = "MasterStreamingInstances"
 
 
-def init_mesh_pool():
-    # Just ensure the (hidden) collection exists; objects are created
-    # lazily as meshes actually stream in.
-    get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
+def create_master_mesh_object(name):
+    coll = get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
 
-
-def _create_master_mesh_object():
-    global _next_lib_index
-    name = f"MeshSource_{_next_lib_index}"
-    _next_lib_index += 1
+    if coll.objects.get(name) is not None:
+        return coll.objects[name]
 
     mesh = bpy.data.meshes.new(name + "_mesh")
     obj = bpy.data.objects.new(name, mesh)
-
-    coll = get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
     coll.objects.link(obj)
-
-    return name
-
-
-def get_or_create_lib_name(mesh_path: str):
-    try:
-        return mesh_path_lib_name_map[mesh_path]
-    except KeyError:
-        if lib_free_indices:
-            lib_name = lib_free_indices.pop()
-        else:
-            lib_name = _create_master_mesh_object()
-        mesh_path_lib_name_map[mesh_path] = lib_name
-        return lib_name
-
+    return obj
 
 def stream_in_mesh(backend_mesh):
-    lib_name = get_or_create_lib_name(backend_mesh.Path)
-    if lib_name is None:
-        return
-
-    obj = bpy.data.objects[lib_name]
+    obj = create_master_mesh_object(backend_mesh.Path)
     build_mesh_from_backend(obj.data, backend_mesh)
     # assign_random_color_material(obj.data, backend_mesh.Path)
 
-
 def stream_out_mesh(mesh_path: str):
-    try:
-        lib_name = mesh_path_lib_name_map[mesh_path]
-    except KeyError:
-        return
-
-    obj = bpy.data.objects[lib_name]
-    obj.data.clear_geometry()
-
-    del mesh_path_lib_name_map[mesh_path]
-    lib_free_indices.append(lib_name)
-
-
-# --- Streamed node instances ---------------------------------------------
-# Each streamed-in node becomes a real Blender object living in its own
-# visible collection. Its .data is pointed at whichever MeshLibrary object
-# currently backs its MeshPath, so it behaves like a linked duplicate: no
-# geometry copy, and it updates automatically whenever the master mesh's
-# geometry is rebuilt by stream_in_mesh/stream_out_mesh.
+    coll = get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
+    obj = coll.objects.get(mesh_path)
+    if obj is not None:
+        bpy.data.objects.remove(obj, do_unlink=True)
 
 STREAMED_INSTANCES_COLLECTION = "StreamedInstances"
 
-instance_objs = []   # pool of real instance objects, grown on demand
-id_to_index = {}     # node id (string) -> index into instance_objs
-free_indices = []    # indices into instance_objs that are free for reuse
-
-
-def _create_instance_object():
+def create_instance_object(name: str):
     coll = get_or_create_collection(STREAMED_INSTANCES_COLLECTION, hide=False)
 
-    index = len(instance_objs)
-    name = f"NodeInstance_{index}"
-
-    # Placeholder mesh so the object is type 'MESH'; its .data will be
-    # replaced with a shared master mesh the first time it's used, and
-    # only ever reused/reassigned after that (this placeholder is only
-    # created once per pool growth).
     placeholder = bpy.data.meshes.new(name + "_mesh")
     obj = bpy.data.objects.new(name, placeholder)
     obj.hide_viewport = True
     obj.hide_render = True
     coll.objects.link(obj)
 
-    instance_objs.append(obj)
-    return index, obj
+    return obj
 
+def add_node(id: str, position, rotation_euler, scale, path: str):
+    obj = create_instance_object(id)
 
-def _get_free_instance_object():
-    if free_indices:
-        index = free_indices.pop()
-        return index, instance_objs[index]
-    return _create_instance_object()
-
-
-def add_node(id: str, position, rotation_euler, scale, lib_name: str):
-    index, obj = _get_free_instance_object()
-    id_to_index[id] = index
-
-    master_obj = bpy.data.objects.get(lib_name)
+    master_obj = bpy.data.objects.get(path)
     if master_obj is not None:
+        old_mesh = obj.data
         obj.data = master_obj.data
+        # The placeholder mesh created in create_instance_object is now an
+        # orphan (0 users) - clean it up instead of leaking a datablock
+        # every time a node streams in.
+        if old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
+    else:
+        print(f"[Smoothie] Warning: master mesh '{path}' not found for node '{id}'; using placeholder.")
 
     obj.location = position
     obj.rotation_euler = rotation_euler
@@ -266,15 +199,27 @@ def add_node(id: str, position, rotation_euler, scale, lib_name: str):
 
 
 def remove_node(id: str):
-    index = id_to_index.pop(id, None)
-    if index is None:
-        return
+    # NOTE: must match the hide state used by create_instance_object,
+    # otherwise removing a single node would hide the whole collection.
+    coll = get_or_create_collection(STREAMED_INSTANCES_COLLECTION, hide=False)
+    obj = coll.objects.get(id)
+    if obj is not None:
+        bpy.data.objects.remove(obj, do_unlink=True)1
 
-    obj = instance_objs[index]
-    obj.hide_viewport = True
-    obj.hide_render = True
-    free_indices.append(index)
+STREAMING_REFERENCES_COLLECTION = "StreamingReferences"
 
+def add_empty(id: str, position):
+    coll = get_or_create_collection(STREAMING_REFERENCES_COLLECTION, hide=False)
+    empty = bpy.data.objects.new(id, None)
+    empty.empty_display_type = 'PLAIN_AXES'
+    coll.objects.link(empty)
+
+    empty.location = position
+
+def remove_empty(id: str):
+    obj = bpy.data.objects.get(id)
+    if obj is not None:
+        bpy.data.objects.remove(obj, do_unlink=True)
 
 ensure_vendor_on_path()
 if not load_clr():
@@ -292,73 +237,101 @@ if LIB_DIR not in sys.path:
     sys.path.append(LIB_DIR)
 
 clr.AddReference("SmoothieBackend")
+# SharpDX.Vector3 is used by the streaming operator below - add the
+# reference and import it here (module load time) rather than inside the
+# operator's execute(), so a missing assembly fails fast at addon
+# registration instead of only when the user clicks the button.
+clr.AddReference("SharpDX")
 
 from SmoothieBackend.API import BlenderAddonAPI
+from SharpDX import Vector3
 from mathutils import Vector, Euler
+def check_and_apply_streaming_changes():
+    changes = BlenderAddonAPI.GetStreamResult()
+    if changes is None:
+        return 1
 
-def on_streaming_tick():
-    """
-    for area in bpy.context.screen.areas:
-    if area.type == 'VIEW_3D':
-        region_3d = area.spaces.active.region_3d
+    for removed_mesh in changes.RemovedMeshes:
+        stream_out_mesh(removed_mesh)
 
-        location = region_3d.view_matrix.inverted().translation
-        BlenderAddonAPI.OnStreamingTick(location.x, location.y, location.z)
-        break
-    :return:
-    """
+    for added_mesh in changes.AddedMeshes:
+        stream_in_mesh(added_mesh)
 
-    cube = bpy.data.objects["Cube"]
-    BlenderAddonAPI.OnStreamingTick(cube.location.x, cube.location.y, cube.location.z)
+    for removed_node in changes.RemovedNodes:
+        remove_node(removed_node.ToString())
 
-    return 1 / 3
-
-def node_id_to_string(node_id):
-    return "{} {}".format(node_id.ParentSector, str(node_id.Index))
-
-import time
-
-def on_apply_streamed_changes_tick():
-    for new_node in BlenderAddonAPI.GetLoadNodesQueue(1000000):
+    for new_node in changes.AddedNodes:
         if not new_node.MeshPath:
             continue
 
-        lib_name = get_or_create_lib_name(new_node.MeshPath)
-        if lib_name is None:
-            continue
-
-        add_node(node_id_to_string(new_node.Id),
+        add_node(new_node.Id.ToString(),
                  Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
                  Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
                  Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
-                 lib_name)
+                 new_node.MeshPath)
 
-    for removed_node in BlenderAddonAPI.GetUnloadNodesQueue(1000000):
-        remove_node(node_id_to_string(removed_node))
+    return None
 
-    for new_mesh in BlenderAddonAPI.GetLoadMeshesQueue(1000000):
-        stream_in_mesh(new_mesh)
 
-    for removed_mesh in BlenderAddonAPI.GetUnloadMeshesQueue(1000000):
-        stream_out_mesh(removed_mesh.Path)
+class SMOOTHIE_OT_queue_streaming_update(bpy.types.Operator):
+    bl_idname = "smoothie.queue_streaming_update"
+    bl_label = "Update Streaming With New Refs"
 
-    return 10
+    def execute(self, context):
+        try:
+            ref_coll = bpy.data.collections.get(STREAMING_REFERENCES_COLLECTION)
+            if ref_coll is None or len(ref_coll.objects) == 0:
+                self.report({'ERROR'}, "No streaming reference point found")
+                return {'CANCELLED'}
+
+            ref_point_location = ref_coll.objects[0].location
+
+            BlenderAddonAPI.StreamInBackground(Vector3(ref_point_location.x, ref_point_location.y, ref_point_location.z))
+            bpy.app.timers.register(check_and_apply_streaming_changes, first_interval=1)
+            self.report({'INFO'}, f"Streaming world around {ref_point_location}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to queue streaming update: {e}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+class SMOOTHIE_PT_panel(bpy.types.Panel):
+    bl_label = "Smoothie"
+    bl_idname = "SMOOTHIE_PT_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Smoothie"
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.operator("smoothie.queue_streaming_update", icon='PLAY')
+
+classes = (
+    SMOOTHIE_PT_panel,
+    SMOOTHIE_OT_queue_streaming_update
+)
 
 def init_streaming():
     BlenderAddonAPI.Initialize()
-    init_mesh_pool()
 
-    BlenderAddonAPI.StartStreaming()
+    get_or_create_collection(MESH_LIBRARY_COLLECTION, hide=True)
+    get_or_create_collection(STREAMED_INSTANCES_COLLECTION, hide=False)
+    ref_coll = get_or_create_collection(STREAMING_REFERENCES_COLLECTION, hide=False)
 
-    bpy.app.timers.register(on_streaming_tick, persistent=True)
-    bpy.app.timers.register(on_apply_streamed_changes_tick, persistent=True)
+    # Avoid creating a duplicate "StreamingRef1.001" empty every time the
+    # addon is registered/reloaded - only create it if it doesn't exist yet.
+    if ref_coll.objects.get("StreamingRef1") is None:
+        add_empty("StreamingRef1", Vector((0, 0, 0)))
 
 def register():
     print("Registering Smoothie World Editor")
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.app.timers.register(init_streaming, first_interval=0.1)
 
 
 def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
     print("Unregistering Smoothie World Editor")
 
 

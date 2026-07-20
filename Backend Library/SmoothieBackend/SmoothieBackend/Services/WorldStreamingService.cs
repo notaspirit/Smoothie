@@ -57,6 +57,11 @@ public class WorldStreamingService
     private bool _isStreaming = false;
     private CancellationTokenSource? _cts = null;
     
+    private bool _doneStreaming = false;
+    private StreamResult? _streamResult;
+    
+    private readonly PeriodicTimer _statsLoggerTimer;
+    
     public WorldStreamingService()
     {
         _streamingPoint = Vector3.Zero;
@@ -71,7 +76,67 @@ public class WorldStreamingService
         _archiveManager.Initialize(new FileInfo(GameExe));
         
         LoadSectorDescriptors(BlockPath);
+
+        _statsLoggerTimer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
     }
+    
+    public StreamResult? GetStreamResult()
+    {
+        if (!_doneStreaming || _streamResult is null)
+            return null;
+        
+        _doneStreaming = false;
+        var result = _streamResult;
+        _streamResult = null;
+        return result;
+    }
+
+    public void StreamInBackground(Vector3 streamingPoint)
+    {
+        _streamingPoint = streamingPoint;
+        _doneStreaming = false;
+        _streamResult = new StreamResult();
+
+        _ = Task.Run(StreamInBackgroundInternal);
+    }
+
+    private async Task StreamInBackgroundInternal()
+    {
+        _ = Task.Run(LogStats);
+        
+        StartStreaming();
+        
+        CheckSectors();
+        
+        foreach (var sector in _loadedSectors.Keys)
+            _processNodeStreamingDistances.Enqueue(sector);
+
+        while (_isStreaming)
+        {
+            await Task.Delay(500);
+
+            if (_sectorLoadQueue.Count != 0 ||
+                _sectorUnloadQueue.Count != 0 ||
+                _meshLoadQueue.Count != 0 ||
+                _meshUnloadQueue.Count != 0 ||
+                _processNodeStreamingDistances.Count != 0) 
+                continue;
+
+            var consumeTasks = new List<Task>
+            {
+                Task.Run(ConsumeAddedMeshesQueue),
+                Task.Run(ConsumeRemovedMeshesQueue),
+                Task.Run(ConsumeAddedNodesQueue),
+                Task.Run(ConsumeRemovedNodesQueue)
+            };
+                
+            await Task.WhenAll(consumeTasks);
+            
+            StopStreaming();
+            _doneStreaming = true;
+            return;
+        }
+    } 
     
     public void StartStreaming()
     {
@@ -92,69 +157,57 @@ public class WorldStreamingService
     {
         _isStreaming = false;
         _cts?.Cancel();
-        _cts?.Dispose();
-        _cts = null;
     }
-    
-    public void Tick(Vector3 streamingPoint)
+
+    private async Task LogStats()
     {
-        Console.WriteLine($"Stats:\n" +
-                          $"Sector Descriptors: {_sectorDescriptors.Count}\n" +
-                          $"Active Sectors: {_activeSectors.Count}\n" +
-                          $"Loaded Sectors: {_loadedSectors.Count}\n" +
-                          $"\n" +
-                          $"Sector Load Queue: {_sectorLoadQueue.Count}\n" +
-                          $"Sector Unload Queue: {_sectorUnloadQueue.Count}\n" +
-                          $"\n" +
-                          $"Node Distances Queue: {_processNodeStreamingDistances.Count}\n" +
-                          $"\n" +
-                          $"Blender Node Load Queue: {_blenderNodeLoadQueue.Count}\n" +
-                          $"Blender Node Unload Queue: {_blenderNodeUnloadQueue.Count}\n" +
-                          $"\n" +
-                          $"Active Meshes: {_activeMeshes.Count}\n" +
-                          $"Loaded Meshes: {_loadedMeshes.Count}\n" +
-                          $"\n" +
-                          $"Mesh Load Queue: {_meshLoadQueue.Count}\n" +
-                          $"Mesh Unload Queue: {_meshUnloadQueue.Count}\n" +
-                          $"\n" +
-                          $"Blender Mesh Load Queue: {_blenderMeshLoadQueue.Count}\n" +
-                          $"Blender Mesh Unload Queue: {_blenderMeshUnloadQueue.Count}");
-        
-        if (_streamingPoint.Equals(streamingPoint) || !_isStreaming)
-            return;
-        
-        _streamingPoint = streamingPoint;
-        Console.WriteLine("Streaming tick with point: " + _streamingPoint.X + ", " + _streamingPoint.Y + ", " + _streamingPoint.Z + "");
-        CheckSectors();
-        
-        foreach (var sector in _loadedSectors.Keys)
-            _processNodeStreamingDistances.Enqueue(sector);
+        while (_isStreaming && await _statsLoggerTimer.WaitForNextTickAsync())
+        {
+            Console.WriteLine($"Stats:\n" +
+                              $"Sector Descriptors: {_sectorDescriptors.Count}\n" +
+                              $"Active Sectors: {_activeSectors.Count}\n" +
+                              $"Loaded Sectors: {_loadedSectors.Count}\n" +
+                              $"\n" +
+                              $"Sector Load Queue: {_sectorLoadQueue.Count}\n" +
+                              $"Sector Unload Queue: {_sectorUnloadQueue.Count}\n" +
+                              $"\n" +
+                              $"Node Distances Queue: {_processNodeStreamingDistances.Count}\n" +
+                              $"\n" +
+                              $"Blender Node Load Queue: {_blenderNodeLoadQueue.Count}\n" +
+                              $"Blender Node Unload Queue: {_blenderNodeUnloadQueue.Count}\n" +
+                              $"\n" +
+                              $"Active Meshes: {_activeMeshes.Count}\n" +
+                              $"Loaded Meshes: {_loadedMeshes.Count}\n" +
+                              $"\n" +
+                              $"Mesh Load Queue: {_meshLoadQueue.Count}\n" +
+                              $"Mesh Unload Queue: {_meshUnloadQueue.Count}\n" +
+                              $"\n" +
+                              $"Blender Mesh Load Queue: {_blenderMeshLoadQueue.Count}\n" +
+                              $"Blender Mesh Unload Queue: {_blenderMeshUnloadQueue.Count}");
+        }
     }
 
     #region  Blender Mesh Queue
     
-    public IEnumerable<BlenderMesh> GetLoadMeshesQueue(int count)
+    private void ConsumeAddedMeshesQueue()
     {
-        var i = 0;
-        while (i < count && _blenderMeshLoadQueue.TryDequeue(out var meshPath))
+        while (_blenderMeshLoadQueue.TryDequeue(out var meshPath))
         {
             if (!_loadedMeshes.TryGetValue(meshPath, out var mesh) || mesh is null)
             {
                 _blenderMeshLoadQueue.Done(meshPath);
                 continue;
             }
-            
-            i++;
+
             _blenderMeshLoadQueue.Done(meshPath);
             _loadedMeshes[meshPath] = null;
-            yield return mesh;
+            _streamResult.AddedMeshes.Add(mesh);
         }
     }
     
-    public IEnumerable<string> GetUnloadMeshesQueue(int count)
+    private void ConsumeRemovedMeshesQueue()
     {
-        var i = 0;
-        while (i < count && _blenderMeshUnloadQueue.TryDequeue(out var meshPath))
+        while (_blenderMeshUnloadQueue.TryDequeue(out var meshPath))
         {
             if (_loadedMeshes.ContainsKey(meshPath) || _activeMeshes.ContainsKey(meshPath))
             {
@@ -162,9 +215,8 @@ public class WorldStreamingService
                 continue;
             }
             
-            i++;
             _blenderMeshUnloadQueue.Done(meshPath);
-            yield return meshPath;
+            _streamResult.RemovedMeshes.Add(meshPath);
         }
     }
     
@@ -172,12 +224,12 @@ public class WorldStreamingService
 
     #region  Blender Node Queue
     
-    public IEnumerable<Node> GetLoadNodesQueue(int count)
+    private void ConsumeAddedNodesQueue()
     {
-        var i = 0;
-        while (i < count && _blenderNodeLoadQueue.TryDequeue(out var nodeId))
+        while (_blenderNodeLoadQueue.TryDequeue(out var nodeId))
         {
-            if (!_loadedSectors.TryGetValue(nodeId.ParentSector, out var sector) || nodeId.Index > sector.Length)
+            if (!_loadedSectors.TryGetValue(nodeId.ParentSector, out var sector) ||
+                nodeId.Index > sector.Length)
             {
                 _blenderNodeLoadQueue.Done(nodeId);
                 continue;
@@ -190,35 +242,29 @@ public class WorldStreamingService
                 continue;
             }
             
-            i++;
             _blenderNodeLoadQueue.Done(nodeId);
-            yield return node;
+            _streamResult.AddedNodes.Add(node);
         }
     }
     
-    public IEnumerable<NodeID> GetUnloadNodesQueue(int count)
+    private void ConsumeRemovedNodesQueue()
     {
-        var i = 0;
-        while (i < count && _blenderNodeUnloadQueue.TryDequeue(out var nodeId))
+        while (_blenderNodeUnloadQueue.TryDequeue(out var nodeId))
         {
             if (_loadedSectors.TryGetValue(nodeId.ParentSector, out var sector))
             {
                 if (nodeId.Index < sector.Length && !sector[nodeId.Index].IsStreaming)
                 {
-                    i++;
                     _blenderNodeUnloadQueue.Done(nodeId);
-                    yield return nodeId;
-                }
-                else
-                {
-                    _blenderNodeUnloadQueue.Done(nodeId);
+                    _streamResult.RemovedNodes.Add(nodeId);
                     continue;
                 }
+                _blenderNodeUnloadQueue.Done(nodeId);
+                continue;
             }
-            
-            i++;
+
             _blenderNodeUnloadQueue.Done(nodeId);
-            yield return nodeId;
+            _streamResult.RemovedNodes.Add(nodeId);
         }
     }
     
@@ -227,15 +273,15 @@ public class WorldStreamingService
     #region Check Streamingdistances
     private void CheckSectors()
     {
-        var perThreadSectors = _sectorDescriptors.Count / ThreadCount;
+        var perThreadSectors = _sectorDescriptors.Count / 6;
         
         var tasks = new List<Task>();
         
-        for (var i = 0; i < ThreadCount; i++)
+        for (var i = 0; i < 6; i++)
         {
             var startIndex = i * perThreadSectors;
             var endIndex = startIndex + perThreadSectors;
-            if (i == ThreadCount - 1)
+            if (i == 6 - 1)
                 endIndex = _sectorDescriptors.Count;
             tasks.Add(Task.Run(() => CheckSectorsInRange(startIndex, endIndex)));
         }
@@ -274,6 +320,13 @@ public class WorldStreamingService
             
             foreach (var node in sector)
             {
+                // Just for testing
+                if (node.MeshPath is null)
+                {
+                    node.IsStreaming = false;
+                    continue;
+                }
+                
                 var previous = node.IsStreaming;
                 node.IsStreaming = node.Position.Contains(ref _streamingPoint) != ContainmentType.Disjoint;
                 

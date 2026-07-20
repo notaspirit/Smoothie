@@ -15,44 +15,13 @@ public static class BlenderAddonAPI
         _worldStreamingService = new WorldStreamingService();
     }
     
-    public static int GetInt()
+    public static void StreamInBackground(Vector3 streamingPoint)
     {
-        var random = new Random().Next();
-        return random;
-    }
-
-    public static void OnStreamingTick(float cameraX, float cameraY, float cameraZ)
-    {
-        _worldStreamingService.Tick(new Vector3(cameraX, cameraY, cameraZ));
+        _worldStreamingService.StreamInBackground(streamingPoint);
     }
     
-    public static void StartStreaming()
+    public static StreamResult? GetStreamResult()
     {
-        _worldStreamingService.StartStreaming();
-    }
-    
-    public static void StopStreaming()
-    {
-        _worldStreamingService.StopStreaming();
-    }
-
-    public static IEnumerable<Node> GetLoadNodesQueue(int count)
-    {
-        return _worldStreamingService.GetLoadNodesQueue(count);
-    }
-    
-    public static IEnumerable<NodeID> GetUnloadNodesQueue(int count)
-    {
-        return _worldStreamingService.GetUnloadNodesQueue(count);
-    }
-    
-    public static IEnumerable<BlenderMesh> GetLoadMeshesQueue(int count)
-    {
-        return _worldStreamingService.GetLoadMeshesQueue(count);
-    }
-    
-    public static IEnumerable<string> GetUnloadMeshesQueue(int count)
-    {
-        return _worldStreamingService.GetUnloadMeshesQueue(count);
+        return _worldStreamingService.GetStreamResult();
     }
 }

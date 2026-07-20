@@ -10,4 +10,6 @@ public record struct NodeID
         ParentSector = parentSector;
         Index = index;
     }
+    
+    public override string ToString() => $"{ParentSector}_{Index}";
 }
