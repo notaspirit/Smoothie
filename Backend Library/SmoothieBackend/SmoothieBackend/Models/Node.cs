@@ -11,5 +11,6 @@ public class Node
     public Vector3 Scale { get; set; }
     public bool IsStreaming { get; set; }
     public string? MeshPath { get; set; }
+    public string? MeshAppearance { get; set; }
     public Node[]? Instances { get; set; }
 }

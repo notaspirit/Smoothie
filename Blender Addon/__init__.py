@@ -50,8 +50,13 @@ def ensure_pythonnet():
             "--target", VENDOR_DIR,
             "pythonnet",
         ])
+        subprocess.check_call([
+            python_exe, "-m", "pip", "install",
+            "--target", VENDOR_DIR,
+            "pillow",
+        ])
         ensure_vendor_on_path()
-        return True, "pythonnet installed successfully into addon/vendor"
+        return True, "pythonnet and pillow installed successfully into addon/vendor"
     except subprocess.CalledProcessError as e:
         return False, f"pip install failed: {e}"
 
@@ -65,6 +70,27 @@ def load_clr():
         pass
 
     return False
+
+ensure_vendor_on_path()
+if not load_clr():
+    python_net_success, msg = ensure_pythonnet()
+
+    if not python_net_success:
+        raise RuntimeError(msg)
+
+    if not load_clr():
+        raise RuntimeError("Failed to load clr")
+
+import clr
+
+if LIB_DIR not in sys.path:
+    sys.path.append(LIB_DIR)
+
+clr.AddReference("SmoothieBackend")
+clr.AddReference("SharpDX")
+
+from SmoothieBackend.API import BlenderAddonAPI
+from SharpDX import Vector3
 
 positions = []
 id_to_index = {}
@@ -142,6 +168,8 @@ def remove_mesh(name):
     return bpy.data.objects.get(name)
 
 import numpy as np
+from PIL import Image
+import io
 
 def build_mesh_from_backend(mesh, backend_mesh):
     mesh.clear_geometry()
@@ -165,7 +193,72 @@ def build_mesh_from_backend(mesh, backend_mesh):
     mesh.polygons.foreach_set("loop_start", loop_start)
     mesh.polygons.foreach_set("loop_total", loop_total)
 
+    # --- UVs ---
+    uvs = np.asarray(backend_mesh.UVs, dtype=np.float32).reshape(-1, 2)
+    loop_uvs = uvs[indices]  # per-vertex UVs -> per-loop, via the same index buffer
+
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    uv_layer.data.foreach_set("uv", loop_uvs.ravel())
+
+    # --- Materials / submeshes ---
+    offsets = list(backend_mesh.SubMeshIndexOffsets) + [num_loops]
+    num_submeshes = len(offsets) - 1
+
+    # pick first appearance, ignore appearance name
+    textures_per_submesh = None
+    if backend_mesh.Textures:
+        first_appearance = next(iter(backend_mesh.Textures.values()))
+        textures_per_submesh = first_appearance  # byte[][]
+
+    material_index = np.zeros(num_tris, dtype=np.int32)
+
+    for sub_idx in range(num_submeshes):
+        start, end = offsets[sub_idx], offsets[sub_idx + 1]
+        poly_start, poly_end = start // 3, end // 3
+        material_index[poly_start:poly_end] = sub_idx
+
+        mat_name = f"{backend_mesh.Path}_mat{sub_idx}" if backend_mesh.Path else f"submesh_{sub_idx}_mat"
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+
+        if textures_per_submesh is not None and sub_idx < len(textures_per_submesh):
+            png_bytes = textures_per_submesh[sub_idx]
+            image = _load_png_bytes_as_blender_image(f"{mat_name}_albedo", png_bytes)
+
+            tex_node = mat.node_tree.nodes.new("ShaderNodeTexImage")
+            tex_node.image = image
+            mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+
+            # if the PNG has meaningful alpha, wire it up and enable blending
+            if image.depth == 32:
+                mat.node_tree.links.new(tex_node.outputs["Alpha"], bsdf.inputs["Alpha"])
+                mat.blend_method = 'HASHED'
+
+        mesh.materials.append(mat)
+
+    mesh.polygons.foreach_set("material_index", material_index)
+
     mesh.update()
+
+
+def _load_png_bytes_as_blender_image(name, png_bytes):
+    pil_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    width, height = pil_img.size
+
+    # PIL is top-to-bottom, Blender images are bottom-to-top
+    pixels = np.asarray(pil_img, dtype=np.float32) / 255.0
+    pixels = np.flipud(pixels).ravel()
+
+    assert pixels.size == width * height * 4, f"{pixels.size} != {width * height * 4}"
+
+    image = bpy.data.images.new(name, width=width, height=height, alpha=True)
+    image.colorspace_settings.name = 'sRGB'
+    image.pixels.foreach_set(pixels)
+    image.pack()  # embed the in-memory data so it survives without a source file on disk
+
+    return image
 
 import random
 
@@ -685,28 +778,6 @@ class SMOOTHIE_OT_remove_and_replicate_instance(bpy.types.Operator):
 
         self.report({'INFO'}, f"Replicated {node_id} as {new_obj.name}")
         return {'FINISHED'}
-
-
-ensure_vendor_on_path()
-if not load_clr():
-    python_net_success, msg = ensure_pythonnet()
-
-    if not python_net_success:
-        raise RuntimeError(msg)
-
-    if not load_clr():
-        raise RuntimeError("Failed to load clr")
-
-import clr
-
-if LIB_DIR not in sys.path:
-    sys.path.append(LIB_DIR)
-
-clr.AddReference("SmoothieBackend")
-clr.AddReference("SharpDX")
-
-from SmoothieBackend.API import BlenderAddonAPI
-from SharpDX import Vector3
 
 def check_and_apply_streaming_changes():
     changes = BlenderAddonAPI.GetStreamResult()

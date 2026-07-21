@@ -24,6 +24,7 @@ public static class StreamingSectorParser
         foreach (var node in nodeData)
         {
             string? meshPath = null;
+            string? meshAppearance = null;
             BoundingSphere? nearAutoHide = null;
             Node[]? instances = null;
 
@@ -33,15 +34,19 @@ public static class StreamingSectorParser
                     nearAutoHide =
                         new BoundingSphere(node.Position.ToSDX().ToVector3(), proxyMeshNode.NearAutoHideDistance);
                     meshPath = proxyMeshNode.Mesh.DepotPath;
+                    meshAppearance = proxyMeshNode.MeshAppearance;
                     break;
                 case worldMeshNode meshNode:
                     meshPath = meshNode.Mesh.DepotPath;
+                    meshAppearance = meshNode.MeshAppearance;
                     break;
                 case worldTerrainMeshNode terrainMeshNode:
                     meshPath = terrainMeshNode.MeshRef.DepotPath;
+                    meshAppearance = "default";
                     break;
                 case worldInstancedMeshNode instancedMeshNode:
                     meshPath = instancedMeshNode.Mesh.DepotPath;
+                    meshAppearance = instancedMeshNode.MeshAppearance;
                     
                     instances = new Node[instancedMeshNode.WorldTransformsBuffer.NumElements];
                     var transformsInstancedBuffer = instancedMeshNode.WorldTransformsBuffer.SharedDataBuffer.Chunk.Buffer.Data as WorldTransformsBuffer;
@@ -56,7 +61,8 @@ public static class StreamingSectorParser
                             Rotation = transform.Rotation.ToEulerAnglesRadian(),
                             Scale = transform.Scale.ToSDX(),
                             IsStreaming = false,
-                            MeshPath = meshPath
+                            MeshPath = meshPath,
+                            MeshAppearance = meshAppearance
                         };
                     }
                     break;
@@ -66,6 +72,7 @@ public static class StreamingSectorParser
                         break;
                     
                     meshPath = foliageNode.Mesh.DepotPath;
+                    meshAppearance = foliageNode.MeshAppearance;
                     instances = new Node[foliageNode.PopulationSpanInfo.StancesCount];
                     for (var fti = 0; fti < foliageNode.PopulationSpanInfo.StancesCount; fti++)
                     {
@@ -83,7 +90,8 @@ public static class StreamingSectorParser
                             }.ToEulerAnglesRadian(),
                             Scale = new Vector3(transform.Scale),
                             IsStreaming = false,
-                            MeshPath = meshPath
+                            MeshPath = meshPath,
+                            MeshAppearance = meshAppearance
                         };
                     }
                     break;
@@ -99,6 +107,7 @@ public static class StreamingSectorParser
                 Rotation = node.Orientation.ToEulerAnglesRadian(),
                 IsStreaming = false,
                 MeshPath = meshPath,
+                MeshAppearance = meshAppearance,
                 Instances = instances
             };
                 

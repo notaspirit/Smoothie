@@ -448,12 +448,13 @@ public class WorldStreamingService
             }
 
             var file = _archiveManager.GetCR2WFile(meshPath);
-            if (file is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob } cmesh })
+            if (file is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob } })
             {
                 _meshLoadQueue.Done(meshPath);
                 continue;
             }
-            var bMesh = BlenderMeshParser.Parse(cmesh)!;
+            
+            var bMesh = BlenderMeshParser.Parse(_archiveManager, file)!;
             bMesh.Path = meshPath;
 
             if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
