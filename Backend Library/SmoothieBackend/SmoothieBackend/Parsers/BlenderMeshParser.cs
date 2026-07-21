@@ -188,7 +188,7 @@ public static class BlenderMeshParser
                 var ri = RedImage.FromXBM(xbm);
                 try
                 {
-                    textures[chunkIndex] = ri.GetPreview(false);
+                    textures[chunkIndex] = ri.GetPreview(true);
                 }
                 catch (Exception e)
                 {
