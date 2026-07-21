@@ -204,7 +204,7 @@ def remove_node(id: str):
     coll = get_or_create_collection(STREAMED_INSTANCES_COLLECTION, hide=False)
     obj = coll.objects.get(id)
     if obj is not None:
-        bpy.data.objects.remove(obj, do_unlink=True)1
+        bpy.data.objects.remove(obj, do_unlink=True)
 
 STREAMING_REFERENCES_COLLECTION = "StreamingReferences"
 
@@ -237,10 +237,6 @@ if LIB_DIR not in sys.path:
     sys.path.append(LIB_DIR)
 
 clr.AddReference("SmoothieBackend")
-# SharpDX.Vector3 is used by the streaming operator below - add the
-# reference and import it here (module load time) rather than inside the
-# operator's execute(), so a missing assembly fails fast at addon
-# registration instead of only when the user clicks the button.
 clr.AddReference("SharpDX")
 
 from SmoothieBackend.API import BlenderAddonAPI

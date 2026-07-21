@@ -56,5 +56,10 @@ public sealed class WorkQueue<TKey> where TKey : notnull
         }
     }
     
-    public int Count => _queue.Count;
+    public int Count {
+        get {
+            lock (_lock)
+                return _queue.Count + _processing.Count;
+        }
+    }
 }

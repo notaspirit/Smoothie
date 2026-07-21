@@ -316,7 +316,10 @@ public class WorldStreamingService
             var sectorPath = _processNodeStreamingDistances.Dequeue(ct);
             
             if (!_loadedSectors.TryGetValue(sectorPath, out var sector))
+            {
+                _processNodeStreamingDistances.Done(sectorPath);
                 continue;
+            }
             
             foreach (var node in sector)
             {
@@ -375,15 +378,24 @@ public class WorldStreamingService
             var sectorPath = _sectorLoadQueue.Dequeue(ct);
             
             if (_loadedSectors.ContainsKey(sectorPath) || !_activeSectors.ContainsKey(sectorPath))
+            {
+                _sectorLoadQueue.Done(sectorPath);
                 continue;
+            }
             
             var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
             if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } sector })
+            {
+                _sectorLoadQueue.Done(sectorPath);
                 continue;
+            }
             
             // double-check before adding, since loading can take a while
             if (_loadedSectors.ContainsKey(sectorPath) || !_activeSectors.ContainsKey(sectorPath))
+            {
+                _sectorLoadQueue.Done(sectorPath);
                 continue;
+            }
             
             var nodeList = new Node[nodeData.Count];
             
@@ -465,16 +477,25 @@ public class WorldStreamingService
             var meshPath = _meshLoadQueue.Dequeue(ct);
 
             if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
+            {
+                _meshLoadQueue.Done(meshPath);
                 continue;
+            }
 
             var file = _archiveManager.GetCR2WFile(meshPath);
             if (file is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob } cmesh })
+            {
+                _meshLoadQueue.Done(meshPath);
                 continue;
+            }
             var bMesh = BlenderMeshParser.Parse(cmesh)!;
             bMesh.Path = meshPath;
 
             if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
+            {
+                _meshLoadQueue.Done(meshPath);
                 continue;
+            }
             
             _loadedMeshes.TryAdd(meshPath, bMesh);
             _meshLoadQueue.Done(meshPath);
@@ -489,11 +510,14 @@ public class WorldStreamingService
             var meshPath = _meshUnloadQueue.Dequeue(ct);
 
             if (!_loadedMeshes.ContainsKey(meshPath) || _activeMeshes.ContainsKey(meshPath))
+            {
+                _meshUnloadQueue.Done(meshPath);
                 continue;
+            }
             
             if (_loadedMeshes.TryRemove(meshPath, out _))
-                _blenderMeshLoadQueue.Enqueue(meshPath);
-            _meshLoadQueue.Done(meshPath);
+                _blenderMeshUnloadQueue.Enqueue(meshPath);
+            _meshUnloadQueue.Done(meshPath);
         }
     }
 
