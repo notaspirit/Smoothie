@@ -124,7 +124,7 @@ public static class BlenderMeshParser
                     if (matEntry.Index < redMesh.LocalMaterialBuffer.Materials.Count)
                         mat = redMesh.LocalMaterialBuffer.Materials[matEntry.Index];
                     else if (matEntry.Index < redMesh.PreloadLocalMaterialInstances.Count)
-                        mat = redMesh.PreloadLocalMaterialInstances[matEntry.Index - redMesh.LocalMaterialBuffer.Materials.Count]!;
+                        mat = redMesh.PreloadLocalMaterialInstances[matEntry.Index ]!;
                     else
                     {
                         Console.WriteLine($"Local Material {matEntry.Index} not found!");
@@ -135,10 +135,23 @@ public static class BlenderMeshParser
                 }
                 else
                 {
-                    Console.WriteLine($"Material {matEntry.Name} is not local!");
-                    textures[chunkIndex] = _fallbackImage;
-                    chunkIndex++;
-                    continue;
+                    CResourceReference<IMaterial>? matRef = null;
+                    CResourceAsyncReference<IMaterial>? asyncMatRef = null;
+                    if (matEntry.Index < redMesh.ExternalMaterials.Count)
+                        asyncMatRef = redMesh.ExternalMaterials[matEntry.Index];
+                    else if (matEntry.Index < redMesh.PreloadExternalMaterials.Count)
+                        matRef = redMesh.PreloadExternalMaterials[matEntry.Index]!;
+                    else
+                    {
+                        Console.WriteLine($"External Material {matEntry.Index} not found!");
+                        textures[chunkIndex] = _fallbackImage;
+                        chunkIndex++;
+                        continue;
+                    }
+                    
+                    var matRefPath = matRef?.DepotPath ?? asyncMatRef?.DepotPath ?? ""; 
+                    
+                    mat = (IMaterial)GetEmbeddedORArchiveRootChunk(archiveManager, meshFile, matRefPath);
                 }
 
                 if (mat is not CMaterialInstance matInst)
@@ -165,21 +178,10 @@ public static class BlenderMeshParser
                     continue;
                 }
                 
-                CBitmapTexture? xbm;
-                var texFile = archiveManager.GetCR2WFile(texRef.DepotPath);
-                if (texFile is not null)
+                var xbmRC = GetEmbeddedORArchiveRootChunk(archiveManager, meshFile, texRef.DepotPath);
+                if (xbmRC is not CBitmapTexture xbm)
                 {
-                    xbm = texFile.RootChunk as CBitmapTexture;
-                }
-                else
-                {
-                    var embeddedFile = meshFile.EmbeddedFiles.FirstOrDefault(efile => efile.FileName == texRef.DepotPath);
-                    xbm = embeddedFile?.Content as CBitmapTexture;
-                }
-                
-                if (xbm is null)
-                {
-                    Console.WriteLine($"Texture {texRef.DepotPath} is not CBitmapTexture!");
+                    Console.WriteLine($"Failed to get texture {texRef.DepotPath} from archive and embedded files!");
                     textures[chunkIndex] = _fallbackImage;
                     chunkIndex++;
                     continue;
@@ -251,5 +253,18 @@ public static class BlenderMeshParser
             throw new Exception("Failed to get fallback image!");
         
         return RedImage.FromXBM(xbm).GetPreview(false);
+    }
+
+    private static RedBaseClass? GetEmbeddedORArchiveRootChunk(IArchiveManager archiveManager, CR2WFile parent, string path)
+    {
+        var embeddedFile = parent.EmbeddedFiles.FirstOrDefault(efile => efile.FileName == path);
+        if (embeddedFile is not null)
+            return embeddedFile.Content;
+        
+        var archiveFile = archiveManager.GetCR2WFile(path);
+        if (archiveFile is not null)
+            return archiveFile.RootChunk;
+        
+        return null;
     }
 }
