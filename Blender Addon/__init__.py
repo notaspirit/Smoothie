@@ -732,11 +732,19 @@ def check_and_apply_streaming_changes():
             # let the backend stream it back in.
             continue
 
-        add_node(node_id,
-                 Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
-                 Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
-                 Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
-                 index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
+        if new_node.Instances is not None and len(new_node.Instances) > 0:
+            for node_instance in new_node.Instances:
+                add_node(node_instance.Id.ToString(),
+                         Vector((node_instance.Position.Center.X, node_instance.Position.Center.Y, node_instance.Position.Center.Z)),
+                         Euler((node_instance.Rotation.Pitch, node_instance.Rotation.Roll, node_instance.Rotation.Yaw)),
+                         Vector((node_instance.Scale.X, node_instance.Scale.Y, node_instance.Scale.Z)),
+                         index_from_lib_name(get_or_create_lib_name(node_instance.MeshPath)))
+        else:
+            add_node(node_id,
+                     Vector((new_node.Position.Center.X, new_node.Position.Center.Y, new_node.Position.Center.Z)),
+                     Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
+                     Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
+                     index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
     return None
 
 def init_streaming():

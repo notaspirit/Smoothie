@@ -229,13 +229,13 @@ public class WorldStreamingService
         while (_blenderNodeLoadQueue.TryDequeue(out var nodeId))
         {
             if (!_loadedSectors.TryGetValue(nodeId.ParentSector, out var sector) ||
-                nodeId.Index > sector.Length)
+                nodeId.NodeDataIndex > sector.Length)
             {
                 _blenderNodeLoadQueue.Done(nodeId);
                 continue;
             }
 
-            var node = sector[nodeId.Index];
+            var node = sector[nodeId.NodeDataIndex];
             if (!node.IsStreaming)
             {
                 _blenderNodeLoadQueue.Done(nodeId);
@@ -253,7 +253,7 @@ public class WorldStreamingService
         {
             if (_loadedSectors.TryGetValue(nodeId.ParentSector, out var sector))
             {
-                if (nodeId.Index < sector.Length && !sector[nodeId.Index].IsStreaming)
+                if (nodeId.NodeDataIndex < sector.Length && !sector[nodeId.NodeDataIndex].IsStreaming)
                 {
                     _blenderNodeUnloadQueue.Done(nodeId);
                     _streamResult.RemovedNodes.Add(nodeId);
@@ -383,50 +383,15 @@ public class WorldStreamingService
                 continue;
             }
             
-            var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
-            if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } sector })
+            var nodes = StreamingSectorParser.Parse(_archiveManager, sectorPath);
+
+            if (nodes is null)
             {
                 _sectorLoadQueue.Done(sectorPath);
                 continue;
             }
-            
-            // double-check before adding, since loading can take a while
-            if (_loadedSectors.ContainsKey(sectorPath) || !_activeSectors.ContainsKey(sectorPath))
-            {
-                _sectorLoadQueue.Done(sectorPath);
-                continue;
-            }
-            
-            var nodeList = new Node[nodeData.Count];
-            
-            var i = 0;
-            foreach (var node in nodeData)
-            {
-                string? meshPath = null;
-                BoundingSphere? nearAutoHide = null;
-                if (sector.Nodes[node.NodeIndex].Chunk is worldMeshNode meshNode)
-                    meshPath = meshNode.Mesh.DepotPath;
 
-                if (sector.Nodes[node.NodeIndex].Chunk is worldGenericProxyMeshNode proxyMesh)
-                    nearAutoHide =
-                        new BoundingSphere(node.Position.ToSDX().ToVector3(), proxyMesh.NearAutoHideDistance);
-
-                
-                nodeList[i] = new Node
-                {
-                    Id = new NodeID(sectorPath, i),
-                    Position = new BoundingSphere( node.Position.ToSDX().ToVector3(), node.UkFloat1),
-                    NearAutoHide = nearAutoHide,
-                    Scale = node.Scale.ToSDX(),
-                    Rotation = node.Orientation.ToEulerAnglesRadian(),
-                    IsStreaming = false,
-                    MeshPath = meshPath
-                };
-                
-                i++;
-            }
-            
-            _loadedSectors.TryAdd(sectorPath, nodeList);
+            _loadedSectors.TryAdd(sectorPath, nodes);
             _sectorLoadQueue.Done(sectorPath);
             _processNodeStreamingDistances.Enqueue(sectorPath);
         }
