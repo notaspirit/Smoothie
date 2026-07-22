@@ -11,30 +11,55 @@ using Vector4 = SharpDX.Vector4;
 
 namespace SmoothieBackend.Parsers;
 
-public static class BlenderMeshParser
+public class BlenderMeshParser
 {
     private record MeshDataCount(uint NumVertices, uint NumIndices, uint NumSubMeshes, List<int> SubmesheIndicesAtLOD);
  
     private static byte[]? _fallbackImage = null;
-    
-    public static BlenderMesh? Parse(IArchiveManager archiveManager, CR2WFile meshFile)
+
+    private readonly IArchiveManager _archiveManager;
+
+    public BlenderMeshParser(IArchiveManager archiveManager)
     {
+        _archiveManager = archiveManager;
+    }
+    
+    public BlenderMesh? Parse(string path)
+    {
+        var meshFile = _archiveManager.GetCR2WFile(path);
         if (meshFile is not  { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return null;
 
-        _fallbackImage ??= GetFallbackImage(archiveManager);
+        _fallbackImage ??= GetFallbackImage();
         
-        var lowestLod = DetermineLowestQualityLOD(rendBlob);
+        var meshMd = MeshMetadata.BuildMeshMetadata(redMesh, rendBlob);
+        var bMesh = ParseGeometryData(redMesh, meshMd);
         
-        var dataSize = CountMeshDataAtLOD(rendBlob, lowestLod);
+        if (bMesh is null)
+            return null;
+        
+        if (!BuildMaterials(bMesh, meshMd, meshFile))
+        {
+            Console.WriteLine($"Failed to build materials for {path}!");
+            return null;
+        }
+        
+        return bMesh;
+    }
+    
+    private static BlenderMesh? ParseGeometryData(CMesh mesh, MeshMetadata meshMd)
+    {
+        if (mesh is not { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob })
+            return null;
+        
+        var wkitMeshInfo = MeshTools.GetMeshesinfo(rendBlob, mesh, "meshName?");
+        
         var bMesh = new BlenderMesh();
-        bMesh.Vertices = new float[dataSize.NumVertices * 3];
-        bMesh.Indices = new uint[dataSize.NumIndices];
-        bMesh.SubMeshIndexOffsets = new uint[dataSize.NumSubMeshes];
-        bMesh.UVs = new float[dataSize.NumVertices * 2];
+        bMesh.Vertices = new float[meshMd.NumVertices * 3];
+        bMesh.Indices = new uint[meshMd.NumIndices];
+        bMesh.SubMeshIndexOffsets = new uint[meshMd.SubmeshesAtLod.Count];
+        bMesh.UVs = new float[meshMd.NumVertices * 2];
         bMesh.Textures = new Dictionary<string, byte[][]>();
-
-        var wkitMeshInfo = MeshTools.GetMeshesinfo(rendBlob, redMesh, "meshName?");
         
         using var ms = new MemoryStream(rendBlob.RenderBuffer.Buffer.GetBytes());
         var br = new BinaryReader(ms);
@@ -53,11 +78,11 @@ public static class BlenderMeshParser
         var indexOffset = 0;
         var subMeshIndex = 0;
         
-        var globalUVIndex = 0;
+        var globalUvIndex = 0;
         
         foreach (var rendInfo in rendBlob.Header.RenderChunkInfos)
         {
-            if (rendInfo.LodMask != lowestLod) 
+            if (rendInfo.LodMask != meshMd.LowestLod)
                 continue;
 
             for (var indexVertex = 0; indexVertex < rendInfo.NumVertices; indexVertex++)
@@ -76,10 +101,10 @@ public static class BlenderMeshParser
                 for (var i = 0; i < rendInfo.NumVertices; i++)
                 {
                     br.BaseStream.Position = wkitMeshInfo.tex0Offsets[subMeshIndex] + (i * 4);
-                    bMesh.UVs[globalUVIndex] = Converters.hfconvert(br.ReadUInt16());
-                    bMesh.UVs[globalUVIndex + 1] = Converters.hfconvert(br.ReadUInt16());
+                    bMesh.UVs[globalUvIndex] = Converters.hfconvert(br.ReadUInt16());
+                    bMesh.UVs[globalUvIndex + 1] = Converters.hfconvert(br.ReadUInt16());
                     
-                    globalUVIndex += 2;
+                    globalUvIndex += 2;
                 }
             }
 
@@ -95,16 +120,26 @@ public static class BlenderMeshParser
             indexOffset += rendInfo.NumVertices;
             subMeshIndex++;
         }
+        
+        return bMesh;
+    }
 
+    private bool BuildMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
+    { 
+        ArgumentNullException.ThrowIfNull(_fallbackImage, "Fallback image not loaded!");
+        
+        if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
+            return false;
+        
         foreach (var meshApp in redMesh.Appearances)
         {
             if (meshApp.Chunk is null)
                 continue;
             
-            bMesh.Textures.TryAdd(meshApp.Chunk.Name!, new byte[dataSize.NumSubMeshes][]);
+            bMesh.Textures.TryAdd(meshApp.Chunk.Name!, new byte[meshMd.SubmeshesAtLod.Count][]);
             var textures = bMesh.Textures[meshApp.Chunk.Name!];
             var chunkIndex = 0;
-            foreach (var matSubmeshIndex in dataSize.SubmesheIndicesAtLOD)
+            foreach (var matSubmeshIndex in meshMd.SubmeshesAtLod)
             {
                 var chunkMat = meshApp.Chunk.ChunkMaterials[matSubmeshIndex];
                 
@@ -116,45 +151,8 @@ public static class BlenderMeshParser
                     chunkIndex++;
                     continue;
                 }
-
-                IMaterial mat;
-
-                if (matEntry.IsLocalInstance)
-                {
-                    if (matEntry.Index < redMesh.LocalMaterialBuffer.Materials.Count)
-                        mat = redMesh.LocalMaterialBuffer.Materials[matEntry.Index];
-                    else if (matEntry.Index < redMesh.PreloadLocalMaterialInstances.Count)
-                        mat = redMesh.PreloadLocalMaterialInstances[matEntry.Index ]!;
-                    else
-                    {
-                        Console.WriteLine($"Local Material {matEntry.Index} not found!");
-                        textures[chunkIndex] = _fallbackImage;
-                        chunkIndex++;
-                        continue;
-                    }
-                }
-                else
-                {
-                    CResourceReference<IMaterial>? matRef = null;
-                    CResourceAsyncReference<IMaterial>? asyncMatRef = null;
-                    if (matEntry.Index < redMesh.ExternalMaterials.Count)
-                        asyncMatRef = redMesh.ExternalMaterials[matEntry.Index];
-                    else if (matEntry.Index < redMesh.PreloadExternalMaterials.Count)
-                        matRef = redMesh.PreloadExternalMaterials[matEntry.Index]!;
-                    else
-                    {
-                        Console.WriteLine($"External Material {matEntry.Index} not found!");
-                        textures[chunkIndex] = _fallbackImage;
-                        chunkIndex++;
-                        continue;
-                    }
-                    
-                    var matRefPath = matRef?.DepotPath ?? asyncMatRef?.DepotPath ?? ""; 
-                    
-                    mat = (IMaterial)GetEmbeddedORArchiveRootChunk(archiveManager, meshFile, matRefPath);
-                }
-
-                if (mat is not CMaterialInstance matInst)
+                
+                if (GetMaterial(matEntry, meshFile) is not CMaterialInstance matInst)
                 {
                     Console.WriteLine($"Material {matEntry.Name} is not CMaterialInstance!");
                     textures[chunkIndex] = _fallbackImage;
@@ -178,93 +176,82 @@ public static class BlenderMeshParser
                     continue;
                 }
                 
-                var xbmRC = GetEmbeddedORArchiveRootChunk(archiveManager, meshFile, texRef.DepotPath);
-                if (xbmRC is not CBitmapTexture xbm)
+                var png = GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath);
+                if (png is null)
                 {
                     Console.WriteLine($"Failed to get texture {texRef.DepotPath} from archive and embedded files!");
                     textures[chunkIndex] = _fallbackImage;
                     chunkIndex++;
                     continue;
                 }
-
-                var ri = RedImage.FromXBM(xbm);
-                try
-                {
-                    textures[chunkIndex] = ri.GetPreview(true);
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"Failed to get preview for {texRef.DepotPath}:");
-                    Console.WriteLine(e);
-                    textures[chunkIndex] = _fallbackImage;
-                }
                 
+                textures[chunkIndex] = png;
                 chunkIndex++;
             }
         }
         
-        return bMesh;
+        return true;
     }
-    
-    private static int DetermineLowestQualityLOD(rendRenderMeshBlob rendBlob)
+
+    private IMaterial? GetMaterial(CMeshMaterialEntry matEntry, CR2WFile meshFile)
     {
-        var lowestLod = 1;
-        var rendInfos = rendBlob.Header.RenderChunkInfos;
-        foreach (var rendInfo in rendInfos)
-        {
-            if (rendInfo.LodMask > lowestLod)
-                lowestLod = rendInfo.LodMask;
-        }
+        if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
+            return null;
         
-        return lowestLod;
-    }
-    
-    private static MeshDataCount CountMeshDataAtLOD(rendRenderMeshBlob rendBlob, int lodMask)
-    {
-        uint numVerts = 0;
-        uint numIndices = 0;
-        uint numSubMeshes = 0;
-        var submesheIndicesAtLOD = new List<int>();
-
-        var i = 0;
-        foreach (var rendInfo in rendBlob.Header.RenderChunkInfos)
+        if (matEntry.IsLocalInstance)
         {
-            if (rendInfo.LodMask != lodMask)
-            {
-                i++;
-                continue;
-            }
-
-            submesheIndicesAtLOD.Add(i);
+            if (matEntry.Index < redMesh.LocalMaterialBuffer.Materials.Count)
+                return redMesh.LocalMaterialBuffer.Materials[matEntry.Index];
             
-            numVerts += rendInfo.NumVertices;
-            numIndices += rendInfo.NumIndices;
-            numSubMeshes++;
-            i++;
+            if (matEntry.Index < redMesh.PreloadLocalMaterialInstances.Count)
+                return redMesh.PreloadLocalMaterialInstances[matEntry.Index ];
+
+            Console.WriteLine($"Local Material {matEntry.Index} not found!");
+            return null;
         }
-        
-        return new MeshDataCount(numVerts, numIndices, numSubMeshes, submesheIndicesAtLOD);   
+
+        CResourceReference<IMaterial>? matRef = null;
+        CResourceAsyncReference<IMaterial>? asyncMatRef = null;
+        if (matEntry.Index < redMesh.ExternalMaterials.Count)
+            asyncMatRef = redMesh.ExternalMaterials[matEntry.Index];
+        else if (matEntry.Index < redMesh.PreloadExternalMaterials.Count)
+            matRef = redMesh.PreloadExternalMaterials[matEntry.Index];
+        else
+        {
+            Console.WriteLine($"External Material {matEntry.Index} not found!");
+            return null;
+        }
+                
+        var matRefPath = matRef?.DepotPath ?? asyncMatRef?.DepotPath ?? ""; 
+                
+        return (IMaterial)GetEmbeddedOrArchiveRootChunk(meshFile, matRefPath);
     }
 
-    private static byte[] GetFallbackImage(IArchiveManager archiveManager)
+    private byte[]? GetPngFromEmbeddedOrArchive(CR2WFile parent, string path)
     {
-        var file = archiveManager.GetCR2WFile(@"base\vehicles\special\av_zetatech_bombus\entities\meshes\textures\av_zetatech_bombus__ext02_nanny_dislpay_pink_b.xbm");
+        var xbmRC = GetEmbeddedOrArchiveRootChunk(parent, path);
+        if (xbmRC is not CBitmapTexture xbm)
+            return null;
+        
+        return RedImage.FromXBM(xbm).GetPreview(true);
+    }
+    
+    private byte[] GetFallbackImage()
+    {
+        var file = _archiveManager.GetCR2WFile(@"base\vehicles\special\av_zetatech_bombus\entities\meshes\textures\av_zetatech_bombus__ext02_nanny_dislpay_pink_b.xbm");
         if (file is not { RootChunk: CBitmapTexture xbm })
             throw new Exception("Failed to get fallback image!");
         
         return RedImage.FromXBM(xbm).GetPreview(false);
     }
 
-    private static RedBaseClass? GetEmbeddedORArchiveRootChunk(IArchiveManager archiveManager, CR2WFile parent, string path)
+    private RedBaseClass? GetEmbeddedOrArchiveRootChunk(CR2WFile parent, string path)
     {
         var embeddedFile = parent.EmbeddedFiles.FirstOrDefault(efile => efile.FileName == path);
         if (embeddedFile is not null)
             return embeddedFile.Content;
         
-        var archiveFile = archiveManager.GetCR2WFile(path);
-        if (archiveFile is not null)
-            return archiveFile.RootChunk;
-        
-        return null;
+        var archiveFile = _archiveManager.GetCR2WFile(path);
+        return archiveFile?.RootChunk;
     }
 }

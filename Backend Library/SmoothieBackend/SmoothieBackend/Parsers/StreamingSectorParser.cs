@@ -10,9 +10,16 @@ using Vector3 = SharpDX.Vector3;
 
 namespace SmoothieBackend.Parsers;
 
-public static class StreamingSectorParser
+public class StreamingSectorParser
 {
-    public static Node[]? Parse(IArchiveManager archiveManager, string sectorPath)
+    private readonly IArchiveManager _archiveManager;
+    
+    public StreamingSectorParser(IArchiveManager archiveManager)
+    {
+        _archiveManager = archiveManager;
+    }
+    
+    public Node[]? Parse(IArchiveManager archiveManager, string sectorPath)
     {
         var sectorFile = archiveManager.GetCR2WFile(sectorPath);
         if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } sector })

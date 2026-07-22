@@ -24,12 +24,15 @@ public class WorldStreamingService
 
     private const int ThreadCount = 18;
     
-    private IArchiveManager _archiveManager;
-    private IHashService _hashService;
-    private Red4ParserService _parserService;
-    private ILoggerService _dummyLogger;
-    private IHookService _hookService;
-    private IProgressService<double> _progressService;
+    private readonly IArchiveManager _archiveManager;
+    private readonly IHashService _hashService;
+    private readonly Red4ParserService _parserService;
+    private readonly ILoggerService _dummyLogger;
+    private readonly IHookService _hookService;
+    private readonly IProgressService<double> _progressService;
+
+    private readonly BlenderMeshParser _meshParser;
+    private readonly StreamingSectorParser _sectorParser;
     
     private Vector3 _streamingPoint;
     private readonly List<SectorDescriptor> _sectorDescriptors = new();
@@ -74,6 +77,9 @@ public class WorldStreamingService
         
         _archiveManager = new ArchiveManager(_hashService, _parserService, _dummyLogger, _progressService);
         _archiveManager.Initialize(new FileInfo(GameExe));
+        
+        _meshParser = new BlenderMeshParser(_archiveManager);
+        _sectorParser = new StreamingSectorParser(_archiveManager);
         
         LoadSectorDescriptors(BlockPath);
 
@@ -383,7 +389,7 @@ public class WorldStreamingService
                 continue;
             }
             
-            var nodes = StreamingSectorParser.Parse(_archiveManager, sectorPath);
+            var nodes = _sectorParser.Parse(_archiveManager, sectorPath);
 
             if (nodes is null)
             {
@@ -446,15 +452,14 @@ public class WorldStreamingService
                 _meshLoadQueue.Done(meshPath);
                 continue;
             }
-
-            var file = _archiveManager.GetCR2WFile(meshPath);
-            if (file is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob } })
+            
+            var bMesh = _meshParser.Parse(meshPath);
+            if (bMesh is null)
             {
                 _meshLoadQueue.Done(meshPath);
                 continue;
             }
             
-            var bMesh = BlenderMeshParser.Parse(_archiveManager, file)!;
             bMesh.Path = meshPath;
 
             if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
