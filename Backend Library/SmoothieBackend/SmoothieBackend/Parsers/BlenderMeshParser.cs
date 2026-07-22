@@ -13,7 +13,7 @@ namespace SmoothieBackend.Parsers;
 
 public class BlenderMeshParser
 {
-    private record MeshDataCount(uint NumVertices, uint NumIndices, uint NumSubMeshes, List<int> SubmesheIndicesAtLOD);
+    private record FlatMaterial(string BaseMaterial, Dictionary<string, object> Properties);
  
     private static byte[]? _fallbackImage = null;
 
@@ -159,27 +159,30 @@ public class BlenderMeshParser
                     chunkIndex++;
                     continue;
                 }
+                
+                var flatMat = GetFlattenedMaterial(matInst, matInst.BaseMaterial.DepotPath.GetString() ?? "");
 
-                if (matInst.BaseMaterial.DepotPath.GetString()?.Contains("metal_base") != true)
+                if (!flatMat.BaseMaterial.Contains("metal_base"))
                 {
                     textures[chunkIndex] = _fallbackImage;
                     chunkIndex++;
                     continue;
                 }
 
-                var baseColorValue = matInst.Values.FirstOrDefault(kvp => kvp.Key == "BaseColor");
-                if (baseColorValue?.Value is not CResourceReference<ITexture> texRef)
+                var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
+                if (baseColorValue is not CResourceReference<ITexture> texRef)
                 {
-                    Console.WriteLine($"Material {matEntry.Name} does not have a BaseColor value!");
+                    Console.WriteLine($"Material {matEntry.Name} with base material {flatMat.BaseMaterial} does not have a BaseColor value!");
+                    Console.WriteLine($"Material properties: {string.Join("\n", flatMat.Properties.Select(kvp => $"{kvp.Key}: {kvp.Value}"))}");
                     textures[chunkIndex] = _fallbackImage;
                     chunkIndex++;
                     continue;
                 }
                 
-                var png = GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath);
+                var png = GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath.GetString() ?? "");
                 if (png is null)
                 {
-                    Console.WriteLine($"Failed to get texture {texRef.DepotPath} from archive and embedded files!");
+                    Console.WriteLine($"Failed to get texture {texRef.DepotPath.GetString()} from archive and embedded files!");
                     textures[chunkIndex] = _fallbackImage;
                     chunkIndex++;
                     continue;
@@ -192,7 +195,95 @@ public class BlenderMeshParser
         
         return true;
     }
+    
+    private FlatMaterial GetFlattenedMaterial(IMaterial material, string basePath)
+    {
+        var baseMaterial = basePath;
+        Dictionary<string, object> properties = new();
+        
+        var currentMat = material;
+        
+        while (true)
+        {
+            switch (currentMat)
+            {
+                case CMaterialInstance matInstance:
+                {
+                    foreach (var kvp in matInstance.Values)
+                    {
+                        string? name = kvp.Key;
+                        if (name is not null)
+                            properties.TryAdd(name, kvp.Value);
+                    }
+                    
+                    if (matInstance.BaseMaterial.DepotPath.GetString() is not { } baseMaterialPath)
+                    {
+                        goto breakOuter;
+                    }
+                    
+                    var baseMatRc = _archiveManager.GetCR2WFile(baseMaterialPath)?.RootChunk;
+                    
+                    if (baseMatRc is not IMaterial baseMat)
+                    {
+                        goto breakOuter;
+                    }
 
+                    currentMat = baseMat;
+                    baseMaterial = baseMaterialPath;
+                    break;
+                }
+                case CMaterialTemplate matTemplate:
+                {
+                    var values = matTemplate.Parameters[2];
+                    foreach (var matParam in values)
+                    {
+                        if (matParam.Chunk is null)
+                            continue;
+
+                        string? name = matParam.Chunk.ParameterName;
+                        object? value = matParam.Chunk switch
+                        {
+                            CMaterialParameterColor mpc => mpc.Color,
+                            CMaterialParameterCpuNameU64 mpcnu => mpcnu.Name,
+                            CMaterialParameterCube mpcu => mpcu.Texture,
+                            CMaterialParameterDynamicTexture mpdt => mpdt.Texture,
+                            CMaterialParameterFoliageParameters mpfp => mpfp.FoliageProfile,
+                            CMaterialParameterGradient mpg => mpg.Gradient,
+                            CMaterialParameterHairParameters mphp => mphp.HairProfile,
+                            CMaterialParameterMultilayerMask mpml => mpml.Mask,
+                            CMaterialParameterMultilayerSetup mpms => mpms.Setup,
+                            CMaterialParameterScalar mps => mps.Scalar,
+                            CMaterialParameterSkinParameters mpsp => mpsp.SkinProfile,
+                            CMaterialParameterStructBuffer => null,
+                            CMaterialParameterTerrainSetup mpts => mpts.Setup,
+                            CMaterialParameterTexture mpt => mpt.Texture,
+                            CMaterialParameterTextureArray mpta => mpta.Texture,
+                            CMaterialParameterVector mpv => mpv.Vector,
+                            _ => null
+                        };
+                        
+                        if (name is not null && value is not null)
+                            properties.TryAdd(name, value);
+                    }
+                    
+                    goto breakOuter;
+                }
+                default:
+                {
+                    Console.WriteLine($"Material {currentMat} is not a material instance or material template!");
+                    goto breakOuter;
+                }
+            }
+            
+            continue;
+            
+            breakOuter:
+            break;
+        }
+        
+        return new FlatMaterial(baseMaterial, properties);
+    }
+    
     private IMaterial? GetMaterial(CMeshMaterialEntry matEntry, CR2WFile meshFile)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
