@@ -1,9 +1,12 @@
 using SharpDX;
+using WolvenKit.RED4.Types;
+using Vector3 = SharpDX.Vector3;
 
 namespace SmoothieBackend.Models;
 
 public class Node
 {
+    public Type NodeType { get; set; } = typeof(worldNode);
     public NodeID Id { get; set; }
     public BoundingSphere Position { get; set; }
     public BoundingSphere? NearAutoHide { get; set; }

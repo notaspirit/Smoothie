@@ -329,8 +329,8 @@ public class WorldStreamingService
             
             foreach (var node in sector)
             {
-                // Just for testing
-                if (node.MeshPath is null)
+                if (node.MeshPath is null ||
+                    node.NodeType.IsAssignableTo(typeof(worldPrefabProxyMeshNode)))
                 {
                     node.IsStreaming = false;
                     continue;

@@ -63,6 +63,7 @@ public class StreamingSectorParser
                             (int)(ti + instancedMeshNode.WorldTransformsBuffer.StartIndex)];
                         instances[ti] = new Node
                         {
+                            NodeType = instancedMeshNode.GetType(),
                             Id = new NodeID(sectorPath, i, ti),
                             Position = new BoundingSphere(transform.Translation.ToSDX(), 0),
                             Rotation = transform.Rotation.ToEulerAnglesRadian(),
@@ -86,6 +87,7 @@ public class StreamingSectorParser
                         var transform = foliageBuffer.Populations[(int)(fti + foliageNode.PopulationSpanInfo.StancesBegin)];
                         instances[fti] = new Node
                         {
+                            NodeType = foliageNode.GetType(),
                             Id = new NodeID(sectorPath, i, fti),
                             Position = new BoundingSphere(transform.Position.ToSDX(), 0),
                             Rotation = new WolvenKit.RED4.Types.Quaternion()
@@ -107,6 +109,7 @@ public class StreamingSectorParser
                 
             outNodes[i] = new Node
             {
+                NodeType = sector.Nodes[node.NodeIndex].Chunk?.GetType() ?? typeof(worldNode),
                 Id = new NodeID(sectorPath, i),
                 Position = new BoundingSphere( node.Position.ToSDX().ToVector3(), node.UkFloat1),
                 NearAutoHide = nearAutoHide,
