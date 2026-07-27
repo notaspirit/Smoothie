@@ -89,7 +89,7 @@ public class StreamingSectorParser
                         {
                             NodeType = foliageNode.GetType(),
                             Id = new NodeID(sectorPath, i, fti),
-                            Position = new BoundingSphere(transform.Position.ToSDX(), 0),
+                            Position = new BoundingSphere(transform.Position.ToSDX() + node.Position.ToSDX().ToVector3(), 0),
                             Rotation = new WolvenKit.RED4.Types.Quaternion()
                             {
                                 I = transform.Rotation.X,
