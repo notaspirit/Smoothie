@@ -4,6 +4,7 @@ using SmoothieBackend.Helpers;
 using SmoothieBackend.Models;
 using WolvenKit.Common;
 using WolvenKit.RED4.Archive.Buffer;
+using WolvenKit.RED4.Archive.CR2W;
 using WolvenKit.RED4.Types;
 using Quaternion = SharpDX.Quaternion;
 using Vector3 = SharpDX.Vector3;
@@ -19,9 +20,8 @@ public class StreamingSectorParser
         _archiveManager = archiveManager;
     }
     
-    public Node[]? Parse(IArchiveManager archiveManager, string sectorPath)
+    public Node[]? Parse(IArchiveManager archiveManager, string sectorPath, CR2WFile sectorFile)
     {
-        var sectorFile = archiveManager.GetCR2WFile(sectorPath);
         if (sectorFile is not { RootChunk: worldStreamingSector { NodeData.Data: worldNodeDataBuffer nodeData } sector })
             return null;
         
@@ -42,10 +42,6 @@ public class StreamingSectorParser
                         new BoundingSphere(node.Position.ToSDX().ToVector3(), proxyMeshNode.NearAutoHideDistance);
                     meshPath = proxyMeshNode.Mesh.DepotPath;
                     meshAppearance = proxyMeshNode.MeshAppearance;
-                    break;
-                case worldMeshNode meshNode:
-                    meshPath = meshNode.Mesh.DepotPath;
-                    meshAppearance = meshNode.MeshAppearance;
                     break;
                 case worldTerrainMeshNode terrainMeshNode:
                     meshPath = terrainMeshNode.MeshRef.DepotPath;
@@ -103,6 +99,10 @@ public class StreamingSectorParser
                             MeshAppearance = meshAppearance
                         };
                     }
+                    break;
+                case IRedMeshNode meshNode:
+                    meshPath = meshNode.Mesh.DepotPath;
+                    meshAppearance = meshNode.MeshAppearance;
                     break;
             }
 

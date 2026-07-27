@@ -10,6 +10,7 @@ using WolvenKit.Common.Services;
 using WolvenKit.Core.Interfaces;
 using WolvenKit.Core.Services;
 using WolvenKit.RED4.Archive.Buffer;
+using WolvenKit.RED4.Archive.CR2W;
 using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.CR2W.Archive;
 using WolvenKit.RED4.Types;
@@ -50,6 +51,7 @@ public class WorldStreamingService
     
     private readonly ConcurrentDictionary<string, BlenderMesh?> _loadedMeshes = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<NodeID, byte>> _activeMeshes = new();
+    private readonly ConcurrentDictionary<string, BlenderMesh> _embeddedMeshes = new();
     
     private readonly BlockingWorkQueue<string> _meshLoadQueue = new(false);
     private readonly BlockingWorkQueue<string> _meshUnloadQueue = new(false);
@@ -389,7 +391,27 @@ public class WorldStreamingService
                 continue;
             }
             
-            var nodes = _sectorParser.Parse(_archiveManager, sectorPath);
+            var sectorFile = _archiveManager.GetCR2WFile(sectorPath);
+            if (sectorFile is null)
+            {
+                _sectorLoadQueue.Done(sectorPath);
+                continue;
+            }
+
+            foreach (var efile in sectorFile.EmbeddedFiles)
+            {
+                if (efile.Content is not CMesh mesh)
+                    continue;
+                
+                var bMesh = _meshParser.Parse(new CR2WFile { RootChunk = mesh });
+                if (bMesh is null)
+                    continue;
+                
+                bMesh.Path = efile.FileName;
+                _embeddedMeshes.TryAdd(efile.FileName, bMesh);
+            }
+            
+            var nodes = _sectorParser.Parse(_archiveManager, sectorPath, sectorFile);
 
             if (nodes is null)
             {
@@ -452,8 +474,13 @@ public class WorldStreamingService
                 _meshLoadQueue.Done(meshPath);
                 continue;
             }
+
+            BlenderMesh? bMesh;
+            if (_embeddedMeshes.TryGetValue(meshPath, out var ebMesh))
+                bMesh = ebMesh;
+            else
+                bMesh = _meshParser.Parse(meshPath);
             
-            var bMesh = _meshParser.Parse(meshPath);
             if (bMesh is null)
             {
                 _meshLoadQueue.Done(meshPath);
@@ -461,7 +488,7 @@ public class WorldStreamingService
             }
             
             bMesh.Path = meshPath;
-
+            
             if (_loadedMeshes.ContainsKey(meshPath) || !_activeMeshes.ContainsKey(meshPath))
             {
                 _meshLoadQueue.Done(meshPath);

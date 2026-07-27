@@ -27,9 +27,14 @@ public class BlenderMeshParser
     public BlenderMesh? Parse(string path)
     {
         var meshFile = _archiveManager.GetCR2WFile(path);
+        return meshFile is not null ? Parse(meshFile) : null;
+    }
+
+    public BlenderMesh? Parse(CR2WFile meshFile)
+    {
         if (meshFile is not  { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return null;
-
+        
         _fallbackImage ??= GetFallbackImage();
         
         var meshMd = MeshMetadata.BuildMeshMetadata(redMesh, rendBlob);
@@ -37,14 +42,13 @@ public class BlenderMeshParser
         
         if (bMesh is null)
             return null;
+
+        if (BuildMaterials(bMesh, meshMd, meshFile))
+            return bMesh;
         
-        if (!BuildMaterials(bMesh, meshMd, meshFile))
-        {
-            Console.WriteLine($"Failed to build materials for {path}!");
-            return null;
-        }
-        
-        return bMesh;
+        Console.WriteLine($"Failed to build materials when parsing mesh.");
+        return null;
+
     }
     
     private static BlenderMesh? ParseGeometryData(CMesh mesh, MeshMetadata meshMd)
