@@ -1,12 +1,13 @@
 using SmoothieBackend.Models;
 using WolvenKit.Common;
+using WolvenKit.Core.Extensions;
+using WolvenKit.Modkit.RED4;
 using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.Types;
-
 using WolvenKit.Modkit.RED4.GeneralStructs;
 using WolvenKit.Modkit.RED4.Tools;
 using WolvenKit.RED4.Archive.CR2W;
-using WolvenKit.RED4.CR2W.Archive;
+using SkiaSharp;
 using Vector4 = SharpDX.Vector4;
 
 namespace SmoothieBackend.Parsers;
@@ -15,7 +16,8 @@ public class BlenderMeshParser
 {
     private record FlatMaterial(string BaseMaterial, Dictionary<string, object> Properties);
  
-    private static byte[]? _fallbackImage = null;
+    private static byte[]? _fallbackColorImage = null;
+    private static byte[]? _fallbackMaskImage = null;
 
     private readonly IArchiveManager _archiveManager;
 
@@ -35,7 +37,8 @@ public class BlenderMeshParser
         if (meshFile is not  { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return null;
         
-        _fallbackImage ??= GetFallbackImage();
+        _fallbackColorImage ??= GetFilledSquarePng(SKColors.DeepPink);
+        _fallbackMaskImage ??= GetFilledSquarePng(SKColors.Black);
         
         var meshMd = MeshMetadata.BuildMeshMetadata(redMesh, rendBlob);
         var bMesh = ParseGeometryData(redMesh, meshMd);
@@ -130,7 +133,7 @@ public class BlenderMeshParser
 
     private bool BuildMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
     { 
-        ArgumentNullException.ThrowIfNull(_fallbackImage, "Fallback image not loaded!");
+        ArgumentNullException.ThrowIfNull(_fallbackColorImage, "Fallback image not loaded!");
         
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return false;
@@ -151,7 +154,7 @@ public class BlenderMeshParser
                 if (matEntry == null)
                 {
                     Console.WriteLine($"Material {chunkMat} not found!");
-                    textures[chunkIndex] = _fallbackImage;
+                    textures[chunkIndex] = _fallbackColorImage;
                     chunkIndex++;
                     continue;
                 }
@@ -159,45 +162,153 @@ public class BlenderMeshParser
                 if (GetMaterial(matEntry, meshFile) is not CMaterialInstance matInst)
                 {
                     Console.WriteLine($"Material {matEntry.Name} is not CMaterialInstance!");
-                    textures[chunkIndex] = _fallbackImage;
+                    textures[chunkIndex] = _fallbackColorImage;
                     chunkIndex++;
                     continue;
                 }
                 
                 var flatMat = GetFlattenedMaterial(matInst, matInst.BaseMaterial.DepotPath.GetString() ?? "");
-
-                if (!flatMat.BaseMaterial.Contains("metal_base"))
-                {
-                    textures[chunkIndex] = _fallbackImage;
-                    chunkIndex++;
-                    continue;
-                }
-
-                var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
-                if (baseColorValue is not CResourceReference<ITexture> texRef)
-                {
-                    Console.WriteLine($"Material {matEntry.Name} with base material {flatMat.BaseMaterial} does not have a BaseColor value!");
-                    Console.WriteLine($"Material properties: {string.Join("\n", flatMat.Properties.Select(kvp => $"{kvp.Key}: {kvp.Value}"))}");
-                    textures[chunkIndex] = _fallbackImage;
-                    chunkIndex++;
-                    continue;
-                }
                 
-                var png = GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath.GetString() ?? "");
-                if (png is null)
-                {
-                    Console.WriteLine($"Failed to get texture {texRef.DepotPath.GetString()} from archive and embedded files!");
-                    textures[chunkIndex] = _fallbackImage;
-                    chunkIndex++;
-                    continue;
-                }
+                byte[]? texture = null;
                 
-                textures[chunkIndex] = png;
+                if (flatMat.BaseMaterial.Contains("metal_base"))
+                {
+                    texture = HandleMetalBaseMaterial(flatMat, meshFile);
+                }
+                else if (flatMat.BaseMaterial.Contains("multilayered"))
+                {
+                    texture = HandleMultilayeredMaterial(flatMat, meshFile);
+                }
+
+                
+                if (texture is not null)
+                    textures[chunkIndex] = texture;
+                else
+                    textures[chunkIndex] = _fallbackColorImage;
+                
                 chunkIndex++;
             }
         }
         
         return true;
+    }
+
+    private byte[]? HandleMultilayeredMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    {
+        if (!flatMat.Properties.TryGetValue("MultilayerSetup", out var rawMls) ||
+            rawMls is not CResourceReference<Multilayer_Setup> mls)
+        {
+            Console.WriteLine($"Material based on {flatMat.BaseMaterial} has no MultilayerSetup!");
+            Console.WriteLine($"Available properties: {string.Join("\n", flatMat.Properties)}");
+            return null;
+        }
+        
+        if (!flatMat.Properties.TryGetValue("MultilayerMask", out var rawMlm) ||
+            rawMlm is not CResourceReference<Multilayer_Mask> mlm)
+        {
+            Console.WriteLine($"Material based on {flatMat.BaseMaterial} has no Mask!");
+            return null;
+        }
+        
+        var mask = GetEmbeddedOrArchiveRootChunk(meshFile, mlm.DepotPath.GetString() ?? "");
+        if (mask is not Multilayer_Mask maskChunk)
+        {
+            Console.WriteLine("Material Mask is not Multilayer_Mask!");
+            return null;
+        }
+        
+        var setup = GetEmbeddedOrArchiveRootChunk(meshFile, mls.DepotPath.GetString() ?? "");
+        if (setup is not Multilayer_Setup setupChunk)
+        {
+            Console.WriteLine("Material Setup is not Multilayer_Setup!");
+            return null;
+        }
+        
+        var maskPngs = ConvertMaskLayerToPng(maskChunk);
+        
+        return BakeMultiLayerSetup(setupChunk, maskPngs);
+    }
+
+    private byte[] BakeMultiLayerSetup(Multilayer_Setup setup, byte[][] maskPngs)
+    {
+        var imageInfo = new SKImageInfo(512, 512);
+        
+        using var completeSurface = SKSurface.Create(imageInfo);
+        var completeCanvas = completeSurface.Canvas;
+        
+        for (var i = 0; i < setup.Layers.Count; i++)
+        {
+            if (i >= maskPngs.Length)
+                continue;
+            
+            var setupLayer = setup.Layers[i];
+            var maskLayer = maskPngs[i];
+            var mltFile = _archiveManager.GetCR2WFile(setupLayer.Material.DepotPath);
+            if (mltFile is not { RootChunk: Multilayer_LayerTemplate mlt })
+            {
+                Console.WriteLine($"Failed to load material template {setupLayer.Material}!");
+                continue;
+            }
+
+            var basePng = GetPngFromArchive(mlt.ColorTexture.DepotPath!);
+            if (basePng is null)
+            {
+                Console.WriteLine($"Failed to load base png from {mlt.ColorTexture}");
+                continue;
+            }
+            
+            using var layerColorBitmapRaw = SKBitmap.Decode(basePng);
+            using var layerBitmap = SKBitmap.Decode(maskLayer);
+            using var layerColorBitmapResized =
+                layerColorBitmapRaw.Resize(new SKImageInfo(512, 512), SKSamplingOptions.Default);
+            
+            using var surface = SKSurface.Create(imageInfo);
+            var canvas = surface.Canvas;
+            
+            canvas.DrawBitmap(layerColorBitmapResized, 0, 0);
+            
+            using var maskPaint = new SKPaint();
+            maskPaint.BlendMode = SKBlendMode.DstIn;
+            maskPaint.ColorFilter = SKColorFilter.CreateLumaColor();
+            
+            canvas.DrawBitmap(layerBitmap, 0, 0, maskPaint);
+            
+            using var masked = surface.Snapshot();
+            
+            completeCanvas.DrawImage(masked, 0, 0);
+        }
+        
+        return completeSurface.Snapshot().Encode(SKEncodedImageFormat.Png, 100).ToArray();
+    }
+    
+    private byte[][] ConvertMaskLayerToPng(Multilayer_Mask mlm)
+    {
+        ModTools.ConvertMultilayerMaskToDdsStreams(mlm, out var mlmLayerStreams);
+
+        byte[][] pngLayers = new byte[mlmLayerStreams.Count][];
+        
+        foreach (var layer in mlmLayerStreams)
+        {
+            if (RedImage.LoadFromDDSMemory(layer.ToByteArray()) is not { } img)
+                throw new Exception("Failed to load DDS!");
+            
+            pngLayers[mlmLayerStreams.IndexOf(layer)] = img.GetPreview(true);
+            layer.Dispose();
+        }
+        
+        return pngLayers;
+    }
+    
+    private byte[]? HandleMetalBaseMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    {
+        var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
+        if (baseColorValue is CResourceReference<ITexture> texRef)
+            return GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath.GetString() ?? "");
+        
+        
+        Console.WriteLine($"Material with base material {flatMat.BaseMaterial} does not have a BaseColor value!");
+        Console.WriteLine($"Material properties: {string.Join("\n", flatMat.Properties.Select(kvp => $"{kvp.Key}: {kvp.Value}"))}");
+        return null;
     }
     
     private FlatMaterial GetFlattenedMaterial(IMaterial material, string basePath)
@@ -331,8 +442,22 @@ public class BlenderMeshParser
         return RedImage.FromXBM(xbm).GetPreview(true);
     }
     
-    private byte[] GetFallbackImage()
+    private byte[]? GetPngFromArchive(string path)
     {
+        var archiveFile = _archiveManager.GetCR2WFile(path);
+        if (archiveFile?.RootChunk is not CBitmapTexture xbm)
+            return null;
+        
+        return RedImage.FromXBM(xbm).GetPreview(true);
+    }
+    
+    private byte[] GetFilledSquarePng(SKColor color, int width = 2, int height = 2)
+    {
+        using var bitmap = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
+        bitmap.Erase(color);
+        
+        return SKImage.FromBitmap(bitmap).Encode(SKEncodedImageFormat.Png, 100).ToArray();
+        
         var file = _archiveManager.GetCR2WFile(@"base\vehicles\special\av_zetatech_bombus\entities\meshes\textures\av_zetatech_bombus__ext02_nanny_dislpay_pink_b.xbm");
         if (file is not { RootChunk: CBitmapTexture xbm })
             throw new Exception("Failed to get fallback image!");

@@ -66,6 +66,9 @@ public class WorldStreamingService
     private StreamResult? _streamResult;
     
     private readonly PeriodicTimer _statsLoggerTimer;
+
+    private const int MaxNodes = 100;
+    private int _nodeCount;
     
     public WorldStreamingService()
     {
@@ -148,6 +151,8 @@ public class WorldStreamingService
     
     public void StartStreaming()
     {
+        _nodeCount = 0;
+        
         _isStreaming = true;
         _cts = new CancellationTokenSource();
 
@@ -158,6 +163,11 @@ public class WorldStreamingService
             Task.Run(() => ProcessNodeStreamingDistances(_cts.Token));
             Task.Run(() => LoadMeshFromQueue(_cts.Token));
             Task.Run(() => UnloadMeshFromQueue(_cts.Token));
+        }
+        
+        for (var i = 0; i < ThreadCount * 10; i++)
+        {
+            Task.Run(() => LoadMeshFromQueue(_cts.Token));
         }
     }
 
@@ -348,6 +358,9 @@ public class WorldStreamingService
                 {
                     if (node.MeshPath is not null)
                     {
+                        if (_nodeCount++ > MaxNodes)
+                            break;
+                        
                         var refs = _activeMeshes.GetOrAdd(node.MeshPath, new ConcurrentDictionary<NodeID, byte>());
                         refs.TryAdd(node.Id, 0);
                         if (refs.Count == 1)
