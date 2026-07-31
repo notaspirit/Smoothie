@@ -145,6 +145,9 @@ public class WorldStreamingService
             
             StopStreaming();
             _doneStreaming = true;
+            
+            _meshParser.LogDebugTimes();
+            
             return;
         }
     } 
