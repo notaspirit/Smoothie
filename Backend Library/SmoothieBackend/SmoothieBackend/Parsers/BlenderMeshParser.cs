@@ -1,15 +1,10 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using SmoothieBackend.Models;
 using WolvenKit.Common;
-using WolvenKit.Core.Extensions;
-using WolvenKit.Modkit.RED4;
-using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.Types;
 using WolvenKit.Modkit.RED4.GeneralStructs;
 using WolvenKit.Modkit.RED4.Tools;
 using WolvenKit.RED4.Archive.CR2W;
-using SkiaSharp;
 using SmoothieBackend.Components;
 using Vector4 = SharpDX.Vector4;
 
@@ -23,10 +18,10 @@ public class BlenderMeshParser
     private readonly ConcurrentDictionary<string, ConcurrentBag<TimeSpan>> _debugTimes = new(); 
     
 
-    public BlenderMeshParser(IArchiveManager archiveManager)
+    public BlenderMeshParser(IArchiveManager archiveManager, MaterialParser materialParser)
     {
         _archiveManager = archiveManager;
-        _materialParser = new MaterialParser(archiveManager);
+        _materialParser = materialParser;
     }
 
     public void LogDebugTimes()

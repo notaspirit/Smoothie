@@ -36,6 +36,14 @@ public class MaterialParser
         _fallbackMaskImage = GetFilledSquarePng(SKColors.Black);
     }
 
+    public void ClearCache()
+    {
+        _imageCache.Clear();
+        _pngCache.Clear();
+        _mlmaskCache.Clear();
+        _cr2wCache.Clear();
+    }
+    
     public bool BakeMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
@@ -168,17 +176,22 @@ public class MaterialParser
                 continue;
             }
             
+            var color = GetMlLayerColor(mlt, setupLayer);
+
             using var surface = SKSurface.Create(imageInfo);
             var canvas = surface.Canvas;
-            
-            canvas.DrawBitmap(colorBitmap, 0, 0);
-            
+
+            using var colorPaint = new SKPaint();
+            colorPaint.ColorFilter = SKColorFilter.CreateBlendMode(color, SKBlendMode.Modulate);
+
+            canvas.DrawBitmap(colorBitmap, 0, 0, colorPaint);
+
             using var maskPaint = new SKPaint();
             maskPaint.BlendMode = SKBlendMode.DstIn;
             maskPaint.ColorFilter = SKColorFilter.CreateLumaColor();
-            
+
             canvas.DrawBitmap(maskLayer, 0, 0, maskPaint);
-            
+
             using var masked = surface.Snapshot();
             completeCanvas.DrawImage(masked, 0, 0);
         }
@@ -186,6 +199,18 @@ public class MaterialParser
         var savedCanvas = completeSurface.Snapshot().Encode(SKEncodedImageFormat.Png, 100).ToArray();
         return savedCanvas;
     }
+
+    private SKColor GetMlLayerColor(Multilayer_LayerTemplate mlt, Multilayer_Layer layer)
+    {
+        var colorId = layer.ColorScale;
+        var cs = mlt.Overrides.ColorScale.FirstOrDefault(cs => cs.N == colorId);
+        if (cs is null || cs.V.Count != 3)
+            return SKColors.Gray;
+        
+        return new SKColor(GetFloatColorAsByte(cs.V[0]), GetFloatColorAsByte(cs.V[1]), GetFloatColorAsByte(cs.V[2]), 255);
+    }
+    
+    private byte GetFloatColorAsByte(float color) => (byte)(color * 255);
 
     private FlatMaterial? GetFlattenedMaterial(CR2WFile meshFile, CName matName)
     {

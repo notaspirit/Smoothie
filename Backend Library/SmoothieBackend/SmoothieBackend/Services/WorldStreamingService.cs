@@ -32,6 +32,7 @@ public class WorldStreamingService
     private readonly IHookService _hookService;
     private readonly IProgressService<double> _progressService;
 
+    private readonly MaterialParser _materialParser;
     private readonly BlenderMeshParser _meshParser;
     private readonly StreamingSectorParser _sectorParser;
     
@@ -83,7 +84,8 @@ public class WorldStreamingService
         _archiveManager = new ArchiveManager(_hashService, _parserService, _dummyLogger, _progressService);
         _archiveManager.Initialize(new FileInfo(GameExe));
         
-        _meshParser = new BlenderMeshParser(_archiveManager);
+        _materialParser = new MaterialParser(_archiveManager);
+        _meshParser = new BlenderMeshParser(_archiveManager, _materialParser);
         _sectorParser = new StreamingSectorParser(_archiveManager);
         
         LoadSectorDescriptors(BlockPath);
@@ -144,10 +146,11 @@ public class WorldStreamingService
             await Task.WhenAll(consumeTasks);
             
             StopStreaming();
-            _doneStreaming = true;
             
             _meshParser.LogDebugTimes();
+            _materialParser.ClearCache();
             
+            _doneStreaming = true;
             return;
         }
     } 
@@ -361,8 +364,8 @@ public class WorldStreamingService
                 {
                     if (node.MeshPath is not null)
                     {
-                        if (_nodeCount++ > MaxNodes)
-                            break;
+                        // if (_nodeCount++ > MaxNodes)
+                        //    break;
                         
                         var refs = _activeMeshes.GetOrAdd(node.MeshPath, new ConcurrentDictionary<NodeID, byte>());
                         refs.TryAdd(node.Id, 0);
