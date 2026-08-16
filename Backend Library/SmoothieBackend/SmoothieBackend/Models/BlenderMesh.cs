@@ -7,5 +7,5 @@ public class BlenderMesh
     public float[] UVs { get; set; }
     public uint[] Indices { get; set; }
     public uint[] SubMeshIndexOffsets { get; set; }
-    public Dictionary<string, byte[][]> Textures { get; set; }
+    public Dictionary<string, BlenderTexture[]> Textures { get; set; }
 }

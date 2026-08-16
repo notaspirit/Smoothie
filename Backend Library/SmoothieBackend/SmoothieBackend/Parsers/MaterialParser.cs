@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using SkiaSharp;
 using SmoothieBackend.Components;
 using SmoothieBackend.Models;
@@ -8,6 +9,7 @@ using WolvenKit.Modkit.RED4;
 using WolvenKit.RED4.Archive.CR2W;
 using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.Types;
+using SmoothieBackend.Extensions;
 
 namespace SmoothieBackend.Parsers;
 
@@ -17,29 +19,39 @@ public class MaterialParser
     
     private readonly IArchiveManager _archiveManager;
     
-    private byte[] _fallbackColorImage;
-    private byte[] _fallbackMaskImage;
+    private BlenderTexture _fallbackColorImage;
+    private BlenderTexture _fallbackMaskImage;
     
     private SKImageInfo _commonImageInfo = new(512, 512, SKColorType.Rgba8888, SKAlphaType.Premul);
     private SKSamplingOptions _commonSamplingOptions = new(SKFilterMode.Nearest, SKMipmapMode.None);
     
-    private readonly ConcurrentDictionary<string, SKBitmap> _imageCache = new();
-    private readonly ConcurrentDictionary<string, byte[]> _pngCache = new();
-    private readonly ConcurrentDictionary<string, SKBitmap[]> _mlmaskCache = new();
-    private readonly ConcurrentDictionary<string, RedBaseClass> _cr2wCache = new();
+    private readonly MemoryCache<string, SKBitmap> _imageCache;
+    private readonly MemoryCache<string, BlenderTexture> _blenderTextureCache;
+    private readonly MemoryCache<string, SKBitmap[]> _mlmaskCache;
+    private readonly MemoryCache<string, RedBaseClass> _cr2wCache;
     
     public MaterialParser(IArchiveManager archiveManager)
     {
         _archiveManager = archiveManager;
         
-        _fallbackColorImage = GetFilledSquarePng(SKColors.DeepPink);
-        _fallbackMaskImage = GetFilledSquarePng(SKColors.Black);
+        _fallbackColorImage = GetFilledSquareBlenderTexture(SKColors.DeepPink);
+        _fallbackMaskImage = GetFilledSquareBlenderTexture(SKColors.Black);
+        
+        var cacheConfig = new MemoryCacheConfig();
+        
+        cacheConfig.MaxItems = 5000;
+        cacheConfig.CacheTickSpan = TimeSpan.FromSeconds(10);
+        
+        _imageCache = new MemoryCache<string, SKBitmap>(cacheConfig);
+        _blenderTextureCache = new MemoryCache<string, BlenderTexture>(cacheConfig);
+        _mlmaskCache = new MemoryCache<string, SKBitmap[]>(cacheConfig);
+        _cr2wCache = new MemoryCache<string, RedBaseClass>(cacheConfig);
     }
 
     public void ClearCache()
     {
         _imageCache.Clear();
-        _pngCache.Clear();
+        _blenderTextureCache.Clear();
         _mlmaskCache.Clear();
         _cr2wCache.Clear();
     }
@@ -48,35 +60,44 @@ public class MaterialParser
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return false;
+        
+        Dictionary<CName, BlenderTexture> processedMaterials = new();
 
         foreach (var meshApp in redMesh.Appearances)
         {
             if (meshApp.Chunk is null)
                 continue;
             
-            BakeMeshAppearance(bMesh, meshMd, meshFile, meshApp.Chunk);
+            BakeMeshAppearance(bMesh, meshMd, meshFile, meshApp.Chunk, processedMaterials);
         }
         
         return true;
     }
 
     private void BakeMeshAppearance(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile,
-        meshMeshAppearance meshApp)
+        meshMeshAppearance meshApp, Dictionary<CName, BlenderTexture> processedMaterials)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return;
         
-        bMesh.Textures.TryAdd(meshApp.Name!, new byte[meshMd.SubmeshesAtLod.Count][]);
+        bMesh.Textures.TryAdd(meshApp.Name!, new BlenderTexture[meshMd.SubmeshesAtLod.Count]);
         var textures = bMesh.Textures[meshApp.Name!];
         var chunkIndex = 0;
 
         foreach (var chunkMat in meshMd.SubmeshesAtLod.Select(matSubmeshIndex => meshApp.ChunkMaterials[matSubmeshIndex]))
         {
-            textures[chunkIndex++] = HandleChunkMaterial(meshFile, chunkMat);
+            if (processedMaterials.TryGetValue(chunkMat, out var texture))
+                textures[chunkIndex++] = texture;
+            else
+            {
+                var text = HandleChunkMaterial(meshFile, chunkMat);
+                processedMaterials.Add(chunkMat, text);
+                textures[chunkIndex++] = text;
+            }
         }
     }
 
-    private byte[] HandleChunkMaterial(CR2WFile meshFile, CName chunkName)
+    private BlenderTexture HandleChunkMaterial(CR2WFile meshFile, CName chunkName)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return _fallbackColorImage;
@@ -98,7 +119,7 @@ public class MaterialParser
         return _fallbackColorImage;
     }
     
-    private byte[]? HandleMetalBaseMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    private BlenderTexture? HandleMetalBaseMaterial(FlatMaterial flatMat, CR2WFile meshFile)
     {
         var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
         if (baseColorValue is CResourceReference<ITexture> texRef)
@@ -111,7 +132,7 @@ public class MaterialParser
         return null;
     }
     
-    private byte[]? HandleMultilayeredMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    private BlenderTexture? HandleMultilayeredMaterial(FlatMaterial flatMat, CR2WFile meshFile)
     {
         if (!flatMat.Properties.TryGetValue("MultilayerSetup", out var rawMls) ||
             rawMls is not CResourceReference<Multilayer_Setup> mls)
@@ -146,7 +167,7 @@ public class MaterialParser
         return baked;
     }
     
-    private byte[] BakeMultiLayerSetup(Multilayer_Setup setup, SKBitmap[] maskPngs)
+    private BlenderTexture BakeMultiLayerSetup(Multilayer_Setup setup, SKBitmap[] maskPngs)
     {
         var imageInfo = new SKImageInfo(512, 512);
         
@@ -196,7 +217,7 @@ public class MaterialParser
             completeCanvas.DrawImage(masked, 0, 0);
         }
         
-        var savedCanvas = completeSurface.Snapshot().Encode(SKEncodedImageFormat.Png, 100).ToArray();
+        var savedCanvas = completeSurface.Snapshot().GetBlenderTexture();
         return savedCanvas;
     }
 
@@ -383,20 +404,20 @@ public class MaterialParser
         return rootChunk;
     }
     
-    private byte[]? GetPngFromEmbeddedOrArchive(CR2WFile parent, string path)
+    private BlenderTexture? GetPngFromEmbeddedOrArchive(CR2WFile parent, string path)
     {
-        if (_pngCache.TryGetValue(path, out var cached))
+        if (_blenderTextureCache.TryGetValue(path, out var cached))
             return cached;
         
-        var xbmRC = GetEmbeddedOrArchiveRootChunk(parent, path);
-        if (xbmRC is not CBitmapTexture xbm)
+        var xbmRc = GetEmbeddedOrArchiveRootChunk(parent, path);
+        if (xbmRc is not CBitmapTexture xbm)
             return null;
         
-        var png = RedImage.FromXBM(xbm).GetPreview(true);
+        var texture = GetSkBitmap(RedImage.FromXBM(xbm)).GetBlenderTexture();
         
-        _pngCache.TryAdd(path, png);
+        _blenderTextureCache.TryAdd(path, texture);
         
-        return png;
+        return texture;
     }
     
     private SKBitmap? GetXbmAsSkBitmapFromArchive(string path)
@@ -451,11 +472,11 @@ public class MaterialParser
         return bitmap.Resize(_commonImageInfo,_commonSamplingOptions);
     }
     
-    private byte[] GetFilledSquarePng(SKColor color, int width = 2, int height = 2)
+    private BlenderTexture GetFilledSquareBlenderTexture(SKColor color, int width = 2, int height = 2)
     {
         using var bitmap = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
         bitmap.Erase(color);
-        
-        return SKImage.FromBitmap(bitmap).Encode(SKEncodedImageFormat.Png, 100).ToArray();
+
+        return bitmap.GetBlenderTexture();
     }
 }

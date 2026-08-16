@@ -130,7 +130,7 @@ public class BlenderMeshParser
         bMesh.Indices = new uint[meshMd.NumIndices];
         bMesh.SubMeshIndexOffsets = new uint[meshMd.SubmeshesAtLod.Count];
         bMesh.UVs = new float[meshMd.NumVertices * 2];
-        bMesh.Textures = new Dictionary<string, byte[][]>();
+        bMesh.Textures = new Dictionary<string, BlenderTexture[]>();
         
         using var ms = new MemoryStream(rendBlob.RenderBuffer.Buffer.GetBytes());
         var br = new BinaryReader(ms);

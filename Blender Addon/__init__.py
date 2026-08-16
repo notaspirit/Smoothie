@@ -8,10 +8,15 @@ bl_info = {
     "category": "Development",
 }
 
+import time
+
 import bpy
 import subprocess
 import sys
 import os
+
+from .logger import Logger
+logger = Logger("logs")
 
 # --- Paths -------------------------------------------------------------
 # Everything pythonnet needs gets installed *inside the addon*, under a
@@ -224,8 +229,8 @@ def build_mesh_from_backend(mesh, backend_mesh):
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
 
         if textures_per_submesh is not None and sub_idx < len(textures_per_submesh):
-            png_bytes = textures_per_submesh[sub_idx]
-            image = _load_png_bytes_as_blender_image(f"{mat_name}_albedo", png_bytes)
+            backend_texture = textures_per_submesh[sub_idx]
+            image = _load_blender_texture(f"{mat_name}_albedo", backend_texture)
 
             tex_node = mat.node_tree.nodes.new("ShaderNodeTexImage")
             tex_node.image = image
@@ -243,20 +248,30 @@ def build_mesh_from_backend(mesh, backend_mesh):
     mesh.update()
 
 
-def _load_png_bytes_as_blender_image(name, png_bytes):
-    pil_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-    width, height = pil_img.size
+def _load_blender_texture(name, blender_texture):
+    """
+    blender_texture: a C# BlenderTexture instance passed in via pythonnet
+                      (has .Width, .Height, .PixelData attributes)
+    """
+    width = blender_texture.Width
+    height = blender_texture.Height
 
-    # PIL is top-to-bottom, Blender images are bottom-to-top
-    pixels = np.asarray(pil_img, dtype=np.float32) / 255.0
+    # blender_texture.PixelData is a System.Byte[] (CLR array), not a Python bytes.
+    # np.frombuffer works directly on it since it supports the buffer protocol.
+    pixels = np.frombuffer(bytes(blender_texture.PixelData), dtype=np.uint8)
+
+    expected_size = width * height * 4
+    assert pixels.size == expected_size, f"{pixels.size} != {expected_size}"
+
+    pixels = pixels.astype(np.float32) / 255.0
+    pixels = pixels.reshape((height, width, 4))
     pixels = np.flipud(pixels).ravel()
-
-    assert pixels.size == width * height * 4, f"{pixels.size} != {width * height * 4}"
 
     image = bpy.data.images.new(name, width=width, height=height, alpha=True)
     image.colorspace_settings.name = 'sRGB'
     image.pixels.foreach_set(pixels)
-    image.pack()  # embed the in-memory data so it survives without a source file on disk
+    # image.pack()
+    image.source = 'GENERATED'
 
     return image
 
@@ -388,7 +403,7 @@ def get_or_create_lib_name(mesh_path: str):
         return mesh_path_lib_name_map[mesh_path]
     except KeyError:
         if not lib_free_indices:
-            print("WARNING: Ran out of pool size, cannot stream in mesh with path: " + mesh_path)
+            logger.info("WARNING: Ran out of pool size, cannot stream in mesh with path: " + mesh_path)
             return None
         slot_id = lib_free_indices.pop()
         lib_name = mesh_path_lib_name_map[slot_id]
@@ -779,19 +794,39 @@ class SMOOTHIE_OT_remove_and_replicate_instance(bpy.types.Operator):
         self.report({'INFO'}, f"Replicated {node_id} as {new_obj.name}")
         return {'FINISHED'}
 
+def format_elapsed(seconds: float) -> str:
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    ms = int((seconds * 1000) % 1000)
+    return f"{m:02d}:{s:02d}.{ms:03d}"
+
+start_time = 0
+
 def check_and_apply_streaming_changes():
     changes = BlenderAddonAPI.GetStreamResult()
     if changes is None:
         return 1
 
+    t = [time.perf_counter()]  # t[0] = start_time reference point (after backend call)
+
+    def mark():
+        t.append(time.perf_counter())
+        return t[-1] - t[-2]
+
+    backend_time = t[0] - start_time
+    logger.info(f"Streaming update received in {format_elapsed(backend_time)}")
+
     for removed_mesh in changes.RemovedMeshes:
         stream_out_mesh(removed_mesh)
+    logger.info(f"Removed meshes in {format_elapsed(mark())}")
 
     for added_mesh in changes.AddedMeshes:
         stream_in_mesh(added_mesh)
+    logger.info(f"Added meshes in {format_elapsed(mark())}")
 
     for removed_node in changes.RemovedNodes:
         remove_node(removed_node.ToString())
+    logger.info(f"Removed nodes in {format_elapsed(mark())}")
 
     for new_node in changes.AddedNodes:
         if not new_node.MeshPath:
@@ -816,8 +851,15 @@ def check_and_apply_streaming_changes():
                      Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
                      Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
                      index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
-    return None
+    logger.info(f"Added nodes in {format_elapsed(mark())}")
 
+    logger.info(f"Processed nodes and meshes in {format_elapsed(t[-1] - t[0])}")
+
+    bpy.context.view_layer.update()
+    logger.info(f"Updated depends graph in {format_elapsed(mark())}")
+
+    logger.info(f"Streaming update applied in {format_elapsed(time.perf_counter() - start_time)}")
+    return None
 def init_streaming():
     global point_cloud_obj
     BlenderAddonAPI.Initialize()
@@ -835,6 +877,7 @@ class SMOOTHIE_OT_queue_streaming_update(bpy.types.Operator):
     bl_label = "Update Streaming With New Refs"
 
     def execute(self, context):
+        global start_time
         try:
             ref_coll = bpy.data.collections.get(STREAMING_REFERENCES_COLLECTION)
             if ref_coll is None or len(ref_coll.objects) == 0:
@@ -842,6 +885,8 @@ class SMOOTHIE_OT_queue_streaming_update(bpy.types.Operator):
                 return {'CANCELLED'}
 
             ref_point_location = ref_coll.objects[0].location
+
+            start_time = time.perf_counter()
 
             BlenderAddonAPI.StreamInBackground(Vector3(ref_point_location.x, ref_point_location.y, ref_point_location.z))
             bpy.app.timers.register(check_and_apply_streaming_changes, first_interval=1)
@@ -914,14 +959,14 @@ def unregister_keymaps():
 
 
 def register():
-    print("Registering Smoothie World Editor")
+    logger.info("Registering Smoothie World Editor")
     for cls in classes:
         bpy.utils.register_class(cls)
     register_keymaps()
     bpy.app.timers.register(init_streaming, first_interval=0.1)
 
 def unregister():
-    print("Unregistering Smoothie World Editor")
+    logger.info("Unregistering Smoothie World Editor")
     unregister_keymaps()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
