@@ -829,9 +829,6 @@ def check_and_apply_streaming_changes():
     logger.info(f"Removed nodes in {format_elapsed(mark())}")
 
     for new_node in changes.AddedNodes:
-        if not new_node.MeshPath:
-            continue
-
         node_id = new_node.Id.ToString()
         if node_id in removed_ids:
             # User explicitly removed this instance via the picker - don't
