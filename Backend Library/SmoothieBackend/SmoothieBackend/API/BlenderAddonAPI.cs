@@ -11,7 +11,9 @@ public static class BlenderAddonAPI
     
     public static void Initialize()
     {
+#if DEBUG
         Debugger.Launch();
+#endif
         _worldStreamingService = new WorldStreamingService();
     }
     

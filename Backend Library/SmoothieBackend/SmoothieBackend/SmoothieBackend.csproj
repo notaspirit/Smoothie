@@ -13,6 +13,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+      <PackageReference Include="DirectXTexNet" Version="1.0.7" />
       <PackageReference Include="SkiaSharp" Version="4.150.1" />
       <PackageReference Include="WolvenKit.Common" Version="8.19.0" />
       <PackageReference Include="WolvenKit.Core" Version="8.19.0" />

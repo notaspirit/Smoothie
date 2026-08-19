@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using DirectXTexNet;
 using SkiaSharp;
 using SmoothieBackend.Components;
 using SmoothieBackend.Models;
@@ -18,33 +19,29 @@ public class MaterialParser
     private record FlatMaterial(string BaseMaterial, Dictionary<string, object> Properties);
     
     private readonly IArchiveManager _archiveManager;
+    private readonly ModTools _modTools;
     
     private BlenderTexture _fallbackColorImage;
     private BlenderTexture _fallbackMaskImage;
     
-    private SKImageInfo _commonImageInfo = new(512, 512, SKColorType.Rgba8888, SKAlphaType.Premul);
-    private SKSamplingOptions _commonSamplingOptions = new(SKFilterMode.Nearest, SKMipmapMode.None);
-    
-    private readonly MemoryCache<string, SKBitmap> _imageCache;
+    private readonly ConcurrentDictionary<string, SKBitmap> _imageCache;
     private readonly MemoryCache<string, BlenderTexture> _blenderTextureCache;
-    private readonly MemoryCache<string, SKBitmap[]> _mlmaskCache;
     private readonly MemoryCache<string, RedBaseClass> _cr2wCache;
     
-    public MaterialParser(IArchiveManager archiveManager)
+    public MaterialParser(IArchiveManager archiveManager, ModTools modTools)
     {
         _archiveManager = archiveManager;
+        _modTools = modTools;
         
         _fallbackColorImage = GetFilledSquareBlenderTexture(SKColors.DeepPink);
         _fallbackMaskImage = GetFilledSquareBlenderTexture(SKColors.Black);
         
         var cacheConfig = new MemoryCacheConfig();
-        
         cacheConfig.MaxItems = 5000;
-        cacheConfig.CacheTickSpan = TimeSpan.FromSeconds(10);
+        cacheConfig.CacheTickSpan = TimeSpan.FromSeconds(30);
         
-        _imageCache = new MemoryCache<string, SKBitmap>(cacheConfig);
+        _imageCache = new ConcurrentDictionary<string, SKBitmap>();
         _blenderTextureCache = new MemoryCache<string, BlenderTexture>(cacheConfig);
-        _mlmaskCache = new MemoryCache<string, SKBitmap[]>(cacheConfig);
         _cr2wCache = new MemoryCache<string, RedBaseClass>(cacheConfig);
     }
 
@@ -52,7 +49,6 @@ public class MaterialParser
     {
         _imageCache.Clear();
         _blenderTextureCache.Clear();
-        _mlmaskCache.Clear();
         _cr2wCache.Clear();
     }
     
@@ -197,6 +193,7 @@ public class MaterialParser
                 continue;
             }
             
+            // consider using shader to reduce on draw calls
             var color = GetMlLayerColor(mlt, setupLayer);
 
             using var surface = SKSurface.Create(imageInfo);
@@ -384,7 +381,9 @@ public class MaterialParser
         var embeddedFile = parent.EmbeddedFiles.FirstOrDefault(efile => efile.FileName == path);
         if (embeddedFile is not null)
         {
-            _cr2wCache.TryAdd(path, embeddedFile.Content);
+            if (embeddedFile.Content is not CBitmapTexture)
+                _cr2wCache.TryAdd(path, embeddedFile.Content);
+            
             return embeddedFile.Content;
         }
         
@@ -398,7 +397,8 @@ public class MaterialParser
         
         var archiveFile = _archiveManager.GetCR2WFile(path);
         var rootChunk = archiveFile?.RootChunk;
-        if (rootChunk is not null)
+        
+        if (rootChunk is not null && rootChunk is not CBitmapTexture)
             _cr2wCache.TryAdd(path, rootChunk);
         
         return rootChunk;
@@ -412,8 +412,9 @@ public class MaterialParser
         var xbmRc = GetEmbeddedOrArchiveRootChunk(parent, path);
         if (xbmRc is not CBitmapTexture xbm)
             return null;
-        
-        var texture = GetSkBitmap(RedImage.FromXBM(xbm)).GetBlenderTexture();
+        using var image = RedImage.FromXBM(xbm);
+        using var bitmap = image.GetSkBitmap(true, true);
+        var texture = bitmap.GetBlenderTexture();
         
         _blenderTextureCache.TryAdd(path, texture);
         
@@ -428,48 +429,32 @@ public class MaterialParser
         if (GetArchiveRootChunk(path) is not CBitmapTexture xbm)
             return null;
 
-        var png = RedImage.FromXBM(xbm).GetPreview(true);
-        
-        using var bitmap = SKBitmap.Decode(png);
-        var bitmapResized =
-            bitmap.Resize(_commonImageInfo,_commonSamplingOptions);
-        
-        _imageCache.TryAdd(path, bitmapResized);
-        
-        return bitmapResized;
+        using var redImage = RedImage.FromXBM(xbm);
+        var bitmap =  redImage.GetSkBitmap(true, true);
+        _imageCache.TryAdd(path, bitmap);
+        return bitmap;
     }
 
     private SKBitmap[]? GetMlMaskAsSkBitmapFromArchive(string path)
     {
-        if (_mlmaskCache.TryGetValue(path, out var cached))
-            return cached;
-        
         if (GetArchiveRootChunk(path) is not Multilayer_Mask mask)
             return null;
-        
-        ModTools.ConvertMultilayerMaskToDdsStreams(mask, out var mlmLayerStreams);
 
-        var bitmaps = new SKBitmap[mlmLayerStreams.Count];
-        
-        foreach (var layer in mlmLayerStreams)
-        {
-            if (RedImage.LoadFromDDSMemory(layer.ToByteArray()) is not { } img)
-                throw new Exception("Failed to load DDS!");
-            
-            bitmaps[mlmLayerStreams.IndexOf(layer)] = GetSkBitmap(img);
-            layer.Dispose();
+        RedBaseClass value = mask.RenderResourceBlob.RenderResourceBlobPC.GetValue();
+        rendRenderMultilayerMaskBlobPC val = (rendRenderMultilayerMaskBlobPC)(object)((value is rendRenderMultilayerMaskBlobPC) ? value : null);
+        if (val == null)
+            return null;
+
+        var bitmaps = new SKBitmap[(val).Header.NumLayers];
+        var i = 0;
+        foreach (var redImg in _modTools.GetRedImages(val))
+        {            
+            bitmaps[i] = redImg.GetSkBitmap(true, false);
+            redImg.Dispose();
+            i++;
         }
         
-        _mlmaskCache.TryAdd(path, bitmaps);
-        
         return bitmaps;
-    }
-
-    private SKBitmap GetSkBitmap(RedImage rimage)
-    {
-        var png = rimage.GetPreview(true);
-        using var bitmap = SKBitmap.Decode(png);
-        return bitmap.Resize(_commonImageInfo,_commonSamplingOptions);
     }
     
     private BlenderTexture GetFilledSquareBlenderTexture(SKColor color, int width = 2, int height = 2)

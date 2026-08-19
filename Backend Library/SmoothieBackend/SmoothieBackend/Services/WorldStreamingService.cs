@@ -9,6 +9,7 @@ using WolvenKit.Common;
 using WolvenKit.Common.Services;
 using WolvenKit.Core.Interfaces;
 using WolvenKit.Core.Services;
+using WolvenKit.Modkit.RED4;
 using WolvenKit.RED4.Archive.Buffer;
 using WolvenKit.RED4.Archive.CR2W;
 using WolvenKit.RED4.CR2W;
@@ -31,6 +32,7 @@ public class WorldStreamingService
     private readonly ILoggerService _dummyLogger;
     private readonly IHookService _hookService;
     private readonly IProgressService<double> _progressService;
+    private readonly ModTools _modTools;
 
     private readonly MaterialParser _materialParser;
     private readonly BlenderMeshParser _meshParser;
@@ -80,11 +82,13 @@ public class WorldStreamingService
         _dummyLogger = new SerilogWrapper();
         _parserService = new Red4ParserService(_hashService, _dummyLogger, _hookService);
         _progressService = new ProgressService<double>();
-        
+
         _archiveManager = new ArchiveManager(_hashService, _parserService, _dummyLogger, _progressService);
         _archiveManager.Initialize(new FileInfo(GameExe));
-        
-        _materialParser = new MaterialParser(_archiveManager);
+
+        _modTools = new ModTools(_dummyLogger, _progressService, _hashService, _parserService, _archiveManager, _hookService);
+
+        _materialParser = new MaterialParser(_archiveManager, _modTools);
         _meshParser = new BlenderMeshParser(_archiveManager, _materialParser);
         _sectorParser = new StreamingSectorParser(_archiveManager);
         

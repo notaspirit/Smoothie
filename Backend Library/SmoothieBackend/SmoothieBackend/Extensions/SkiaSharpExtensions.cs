@@ -6,6 +6,18 @@ namespace SmoothieBackend.Extensions;
 
 public static class SkiaSharpExtensions
 {
+    public static SKBitmap TryResize(this SKBitmap bitmap, SKImageInfo info, SKSamplingOptions options)
+    {
+        if (bitmap.Width != info.Width || bitmap.Height != info.Height)
+        {
+            var resized = bitmap.Resize(info, options);
+            bitmap.Dispose();
+            return resized;
+        }
+        
+        return bitmap;
+    }
+    
     public static BlenderTexture GetBlenderTexture(this SKBitmap bitmap)
     {
         return new BlenderTexture

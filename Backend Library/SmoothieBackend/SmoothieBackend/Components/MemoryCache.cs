@@ -2,8 +2,8 @@ using System.Collections.Concurrent;
 using SmoothieBackend.Models;
 
 namespace SmoothieBackend.Components;
-
-public class MemoryCache<TKey, TValue> where TKey : notnull
+/// <remarks>Do not use with IDisposible or IEnumerable:IDisposible, it will leak memory.</remarks>
+public class MemoryCache<TKey, TValue> where TKey : notnull where TValue : notnull
 {
     private readonly MemoryCacheConfig _options;
     private readonly int _maxItemsClearTarget;
