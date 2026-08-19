@@ -16,6 +16,11 @@ namespace SmoothieBackend.Parsers;
 
 public class MaterialParser
 {
+    private readonly ConcurrentDictionary<string, int> _mlMaskUsageCount = new();
+    private readonly ConcurrentDictionary<string, int> _mlSetupUsageCount = new();
+    private readonly ConcurrentDictionary<string, int> _metalBaseUsageCount = new();
+    private readonly ConcurrentDictionary<string, int> _multilayerUsageCount = new();
+    
     private record FlatMaterial(string BaseMaterial, Dictionary<string, object> Properties);
     
     private readonly IArchiveManager _archiveManager;
@@ -25,8 +30,10 @@ public class MaterialParser
     private BlenderTexture _fallbackMaskImage;
     
     private readonly ConcurrentDictionary<string, SKBitmap> _imageCache;
-    private readonly MemoryCache<string, BlenderTexture> _blenderTextureCache;
-    private readonly MemoryCache<string, RedBaseClass> _cr2wCache;
+    private readonly ConcurrentDictionary<string, BlenderTexture> _blenderTextureCache;
+    private readonly ConcurrentDictionary<string, RedBaseClass> _cr2wCache;
+    
+    private readonly ConcurrentDictionary<string, SKBitmap[]> _mlMaskCache = new();
     
     public MaterialParser(IArchiveManager archiveManager, ModTools modTools)
     {
@@ -41,15 +48,55 @@ public class MaterialParser
         cacheConfig.CacheTickSpan = TimeSpan.FromSeconds(30);
         
         _imageCache = new ConcurrentDictionary<string, SKBitmap>();
-        _blenderTextureCache = new MemoryCache<string, BlenderTexture>(cacheConfig);
-        _cr2wCache = new MemoryCache<string, RedBaseClass>(cacheConfig);
+        _blenderTextureCache = new ConcurrentDictionary<string, BlenderTexture>();
+        _cr2wCache = new ConcurrentDictionary<string, RedBaseClass>();
     }
 
     public void ClearCache()
     {
+        foreach (var img in _imageCache)
+            img.Value.Dispose();
         _imageCache.Clear();
+        foreach (var mlmask in _mlMaskCache)
+            foreach (var mlmaskBitmap in mlmask.Value)
+                mlmaskBitmap.Dispose();
+        _mlMaskCache.Clear();
+        
         _blenderTextureCache.Clear();
         _cr2wCache.Clear();
+        
+        Console.WriteLine(BuildLogMessage(_mlMaskUsageCount, "Multilayer Mask"));
+        Console.WriteLine(BuildLogMessage(_mlSetupUsageCount, "Multilayer Setup"));
+        Console.WriteLine(BuildLogMessage(_multilayerUsageCount, "Multilayer"));
+        Console.WriteLine(BuildLogMessage(_metalBaseUsageCount, "Metal Base"));
+        
+        _mlMaskUsageCount.Clear();
+        _mlSetupUsageCount.Clear();
+        _multilayerUsageCount.Clear();
+        _metalBaseUsageCount.Clear();
+    }
+
+    private string BuildLogMessage(ConcurrentDictionary<string, int> usageCounts, string name)
+    {
+        var mostUsedSetupPath = "";
+        var mostUsedSetupCount = 0;
+        var averageSetupUsed = 0;
+        foreach (var (path, count) in usageCounts)
+        {
+            if (count > mostUsedSetupCount)
+            {
+                mostUsedSetupPath = path;
+                mostUsedSetupCount = count;
+            }
+            
+            averageSetupUsed += count;
+        }
+        
+        averageSetupUsed /= usageCounts.Count;
+
+        return $"{name} Usage Stats: \n" +
+               $"Most used: {mostUsedSetupCount} ({mostUsedSetupPath})\n" +
+               $"Average used: {averageSetupUsed}";
     }
     
     public bool BakeMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
@@ -120,6 +167,7 @@ public class MaterialParser
         var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
         if (baseColorValue is CResourceReference<ITexture> texRef)
         {
+            _metalBaseUsageCount.AddOrUpdate(texRef.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
             return GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath.GetString() ?? "");
         }
         
@@ -130,6 +178,7 @@ public class MaterialParser
     
     private BlenderTexture? HandleMultilayeredMaterial(FlatMaterial flatMat, CR2WFile meshFile)
     {
+        
         if (!flatMat.Properties.TryGetValue("MultilayerSetup", out var rawMls) ||
             rawMls is not CResourceReference<Multilayer_Setup> mls)
         {
@@ -145,6 +194,15 @@ public class MaterialParser
             return null;
         }
         
+        var textureId = (mls.DepotPath.GetString() ?? "") + (mlm.DepotPath.GetString() ?? "");
+        
+        _mlMaskUsageCount.AddOrUpdate(mlm.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
+        _mlSetupUsageCount.AddOrUpdate(mls.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
+        _multilayerUsageCount.AddOrUpdate(textureId, 1, (_, value) => value + 1);
+        
+        if (_blenderTextureCache.TryGetValue(textureId, out var cached))
+            return cached;
+        
         var setup = GetEmbeddedOrArchiveRootChunk(meshFile, mls.DepotPath.GetString() ?? "");
         if (setup is not Multilayer_Setup setupChunk)
         {
@@ -159,7 +217,9 @@ public class MaterialParser
         }
         
         var baked = BakeMultiLayerSetup(setupChunk, masks);
-
+        
+        _blenderTextureCache.TryAdd(textureId, baked);
+        
         return baked;
     }
     
@@ -437,6 +497,9 @@ public class MaterialParser
 
     private SKBitmap[]? GetMlMaskAsSkBitmapFromArchive(string path)
     {
+        if (_mlMaskCache.TryGetValue(path, out var cached))
+            return cached;
+        
         if (GetArchiveRootChunk(path) is not Multilayer_Mask mask)
             return null;
 
@@ -445,7 +508,7 @@ public class MaterialParser
         if (val == null)
             return null;
 
-        var bitmaps = new SKBitmap[(val).Header.NumLayers];
+        var bitmaps = new SKBitmap[val.Header.NumLayers];
         var i = 0;
         foreach (var redImg in _modTools.GetRedImages(val))
         {            
@@ -453,6 +516,8 @@ public class MaterialParser
             redImg.Dispose();
             i++;
         }
+        
+        _mlMaskCache.TryAdd(path, bitmaps);
         
         return bitmaps;
     }
