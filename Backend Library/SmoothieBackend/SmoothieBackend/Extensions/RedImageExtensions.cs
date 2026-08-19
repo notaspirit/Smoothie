@@ -45,7 +45,11 @@ public static class RedImageExtensions
             var png = redImage.GetPreview(flip);
             var bitmap  = SKBitmap.Decode(png);
             if (resize)
-                return bitmap.TryResize(_commonImageInfo, _commonSamplingOptions);
+            {
+                var resized = bitmap.Resize(_commonImageInfo, _commonSamplingOptions);
+                bitmap.Dispose();
+                return resized;
+            }
             
             return bitmap;
         }
@@ -61,7 +65,7 @@ public static class RedImageExtensions
         raw.InstallPixels(info, pixelBuf, (int)image.RowPitch, (addr, _) => Marshal.FreeHGlobal(addr));
 
         var result = raw;
-        /*
+        
         if (flip)
         {
             var flipped = new SKBitmap(info);
@@ -74,10 +78,15 @@ public static class RedImageExtensions
             raw.Dispose();
             result = flipped;
         }
-        */
+        
         
         if (resize)
-            return result.TryResize(_commonImageInfo, _commonSamplingOptions);
+        {
+            var resized = result.Resize(_commonImageInfo, _commonSamplingOptions);
+            result.Dispose();
+            return resized;
+        }
+        
         return result;
     }
 }
