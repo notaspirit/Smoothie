@@ -260,7 +260,7 @@ public class MaterialParser
             var canvas = surface.Canvas;
 
             using var colorPaint = new SKPaint();
-            colorPaint.ColorFilter = SKColorFilter.CreateBlendMode(color, SKBlendMode.Modulate);
+            colorPaint.ColorFilter = SKColorFilter.CreateBlendMode(color, SKBlendMode.Multiply);
 
             canvas.DrawBitmap(colorBitmap, 0, 0, colorPaint);
 
