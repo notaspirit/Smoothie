@@ -71,6 +71,7 @@ def check_and_apply_streaming_changes():
     """
     from .streaming_mesh import stream_in_mesh, stream_out_mesh, get_or_create_lib_name, index_from_lib_name
     from .streaming_node import add_node, remove_node
+    from .streaming_material import stream_in_material, stream_out_material
     
     changes = BlenderAddonAPI.GetStreamResult()
     if changes is None:
@@ -83,23 +84,32 @@ def check_and_apply_streaming_changes():
         return t[-1] - t[-2]
 
     backend_time = t[0] - gs.start_time
-    if gs.logger:
-        gs.logger.info(f"Streaming update received in {utils.format_elapsed(backend_time)}")
+    gs.logger.info(f"Streaming update received in {utils.format_elapsed(backend_time)}")
+
+    for removed_mat in changes.RemovedTextures:
+        stream_out_material(removed_mat.ToString())
+
+    gs.logger.info(f"Removed materials in {utils.format_elapsed(mark())}")
+
+    for added_mat in changes.AddedTextures:
+        stream_in_material(added_mat)
+
+    gs.logger.info(f"Added materials in {utils.format_elapsed(mark())}")
 
     for removed_mesh in changes.RemovedMeshes:
         stream_out_mesh(removed_mesh)
-    if gs.logger:
-        gs.logger.info(f"Removed meshes in {utils.format_elapsed(mark())}")
+
+    gs.logger.info(f"Removed meshes in {utils.format_elapsed(mark())}")
 
     for added_mesh in changes.AddedMeshes:
         stream_in_mesh(added_mesh)
-    if gs.logger:
-        gs.logger.info(f"Added meshes in {utils.format_elapsed(mark())}")
+
+    gs.logger.info(f"Added meshes in {utils.format_elapsed(mark())}")
 
     for removed_node_data in changes.RemovedNodes:
         remove_node(removed_node_data.ToString())
-    if gs.logger:
-        gs.logger.info(f"Removed nodes in {utils.format_elapsed(mark())}")
+
+    gs.logger.info(f"Removed nodes in {utils.format_elapsed(mark())}")
 
     for new_node in changes.AddedNodes:
         node_id = new_node.Id.ToString()
@@ -121,16 +131,14 @@ def check_and_apply_streaming_changes():
                      Euler((new_node.Rotation.Pitch, new_node.Rotation.Roll, new_node.Rotation.Yaw)),
                      Vector((new_node.Scale.X, new_node.Scale.Y, new_node.Scale.Z)),
                      index_from_lib_name(get_or_create_lib_name(new_node.MeshPath)))
-    
-    if gs.logger:
-        gs.logger.info(f"Added nodes in {utils.format_elapsed(mark())}")
-        gs.logger.info(f"Processed nodes and meshes in {utils.format_elapsed(t[-1] - t[0])}")
+
+    gs.logger.info(f"Added nodes in {utils.format_elapsed(mark())}")
+    gs.logger.info(f"Processed nodes, meshes and textures in {utils.format_elapsed(t[-1] - t[0])}")
 
     bpy.context.view_layer.update()
-    
-    if gs.logger:
-        gs.logger.info(f"Updated depends graph in {utils.format_elapsed(mark())}")
-        gs.logger.info(f"Streaming update applied in {utils.format_elapsed(time.perf_counter() - gs.start_time)}")
+
+    gs.logger.info(f"Updated depends graph in {utils.format_elapsed(mark())}")
+    gs.logger.info(f"Streaming update applied in {utils.format_elapsed(time.perf_counter() - gs.start_time)}")
     
     return None
 

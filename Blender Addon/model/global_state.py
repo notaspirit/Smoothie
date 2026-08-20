@@ -24,6 +24,9 @@ next_index: int = 0
 mesh_path_lib_name_map: Dict[Any, str] = {}
 lib_free_indices: List[Any] = []
 
+# --- Material Library State ---
+material_library: Dict[str, Any] = {}
+
 # Reverse of mesh_path_lib_name_map (path side only) so the picker/replicate
 # code can figure out which source mesh path a given lib_name currently
 # holds, without scanning the whole dict.

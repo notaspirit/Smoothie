@@ -64,7 +64,7 @@ def build_mesh_from_backend(mesh: bpy.types.Mesh, backend_mesh):
     textures_per_submesh = None
     if backend_mesh.Textures:
         first_appearance = next(iter(backend_mesh.Textures.values()))
-        textures_per_submesh = first_appearance  # byte[][]
+        textures_per_submesh = first_appearance  # MaterialID[]
 
     material_index = np.zeros(num_tris, dtype=np.int32)
 
@@ -73,26 +73,12 @@ def build_mesh_from_backend(mesh: bpy.types.Mesh, backend_mesh):
         poly_start, poly_end = start // 3, end // 3
         material_index[poly_start:poly_end] = sub_idx
 
-        mat_name = f"{backend_mesh.Path}_mat{sub_idx}" if backend_mesh.Path else f"submesh_{sub_idx}_mat"
-        mat = bpy.data.materials.new(name=mat_name)
-        mat.use_nodes = True
-
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-
         if textures_per_submesh is not None and sub_idx < len(textures_per_submesh):
-            backend_texture = textures_per_submesh[sub_idx]
-            image = _load_blender_texture(f"{mat_name}_albedo", backend_texture)
-
-            tex_node = mat.node_tree.nodes.new("ShaderNodeTexImage")
-            tex_node.image = image
-            mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
-
-            # if the PNG has meaningful alpha, wire it up and enable blending
-            if image.depth == 32:
-                mat.node_tree.links.new(tex_node.outputs["Alpha"], bsdf.inputs["Alpha"])
-                mat.blend_method = 'HASHED'
-
-        mesh.materials.append(mat)
+            backend_texture_id = textures_per_submesh[sub_idx].ToString()
+            if backend_texture_id in gs.material_library:
+                mesh.materials.append(gs.material_library[backend_texture_id])
+            else:
+                print("WARNING: Material not found in library: " + backend_texture_id)
 
     mesh.polygons.foreach_set("material_index", material_index)
     mesh.update()

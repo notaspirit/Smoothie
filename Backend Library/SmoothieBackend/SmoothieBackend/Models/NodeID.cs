@@ -1,3 +1,5 @@
+using XXHash3NET;
+
 namespace SmoothieBackend.Models;
 
 public record struct NodeID
@@ -13,11 +15,5 @@ public record struct NodeID
         InstanceIndex = instanceIndex;
     }
 
-    public override string ToString()
-    {
-        if (InstanceIndex is not null)
-            return $"{ParentSector}_{NodeDataIndex}_{InstanceIndex}";
-
-        return $"{ParentSector}_{NodeDataIndex}";
-    }
+    public override string ToString() => XXHash64.Compute($"{ParentSector}{NodeDataIndex}{InstanceIndex}").ToString();
 }

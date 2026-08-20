@@ -9,4 +9,7 @@ public class StreamResult
     
     public ConcurrentBag<Node> AddedNodes { get; set; } = [];
     public ConcurrentBag<NodeID> RemovedNodes { get; set; } = [];
+    
+    public ConcurrentBag<BlenderTexture> AddedTextures { get; set; } = [];
+    public ConcurrentBag<MaterialID> RemovedTextures { get; set; } = [];
 }

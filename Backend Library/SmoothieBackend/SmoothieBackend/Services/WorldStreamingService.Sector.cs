@@ -194,19 +194,8 @@ public partial class WorldStreamingService
                 _sectorLoadQueue.Done(sectorPath);
                 continue;
             }
-
-            foreach (var efile in sectorFile.EmbeddedFiles)
-            {
-                if (efile.Content is not CMesh mesh)
-                    continue;
-                
-                var bMesh = _meshParser.Parse(new CR2WFile { RootChunk = mesh });
-                if (bMesh is null)
-                    continue;
-                
-                bMesh.Path = efile.FileName;
-                _embeddedMeshes.TryAdd(efile.FileName, bMesh);
-            }
+            
+            _embeddedMeshes.AddEmbeddedFiles(sectorFile, sectorPath, ProcessEmbeddedMesh);
             
             var nodes = _sectorParser.Parse(_archiveManager, sectorPath, sectorFile);
 
@@ -222,6 +211,20 @@ public partial class WorldStreamingService
         }
     }
 
+    private BlenderMesh? ProcessEmbeddedMesh(RedBaseClass redBase)
+    {
+        if (redBase is not CMesh mesh)
+            return null;
+
+        var (bmesh, mats) = _meshParser.Parse(new CR2WFile { RootChunk = mesh });
+        
+        if (mats is not null)
+            foreach(var mat in mats)
+                _materialLoadQueue.Enqueue(mat);
+            
+        return bmesh;
+    }
+
     private async Task UnloadSectorFromQueue(CancellationToken ct = default)
     {
         while (!ct.IsCancellationRequested)
@@ -234,6 +237,8 @@ public partial class WorldStreamingService
             foreach (var node in sector)
                 if (node.IsStreaming)
                     _blenderNodeUnloadQueue.Enqueue(node.Id);
+            
+            _embeddedMeshes.RemoveEmbeddedFiles(sectorPath);
             
             _sectorUnloadQueue.Done(sectorPath);
         }

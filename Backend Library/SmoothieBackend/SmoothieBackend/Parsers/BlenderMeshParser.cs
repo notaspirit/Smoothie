@@ -14,108 +14,33 @@ public class BlenderMeshParser
 {
     private readonly IArchiveManager _archiveManager;
     private readonly MaterialParser _materialParser;
-    
-    private readonly ConcurrentDictionary<string, ConcurrentBag<TimeSpan>> _debugTimes = new(); 
-    
 
     public BlenderMeshParser(IArchiveManager archiveManager, MaterialParser materialParser)
     {
         _archiveManager = archiveManager;
         _materialParser = materialParser;
     }
-
-    public void LogDebugTimes()
-    {
-        var averageTimes = _debugTimes.ToDictionary(kvp => kvp.Key,
-            kvp => kvp.Value.Count > 0 ? kvp.Value.Average(t => t.TotalMilliseconds) : 0);
-
-        Log("e2e mesh parse", "", 0);
-
-        return;
-        
-        void Log(string name, string parentName, int indent)
-        {
-            if (!averageTimes.TryGetValue(name, out var time) || time == 0) return;
-
-            var indentStr = new string(' ', indent * 2);
-            var pctStr = "";
-            if (!string.IsNullOrEmpty(parentName) && averageTimes.TryGetValue(parentName, out var parentTime) && parentTime > 0)
-            {
-                var pct = (time / parentTime) * 100;
-                pctStr = $" ({pct:F2}%)";
-            }
-
-            Console.WriteLine($"{indentStr}{name}: {time:F2}ms{pctStr}");
-
-            // Define children for each node
-            switch (name)
-            {
-                case "e2e mesh parse":
-                    Log("parse geometry", name, indent + 1);
-                    Log("e2e material chunk", name, indent + 1);
-                    break;
-                case "e2e material chunk":
-                    Log("get material", name, indent + 1);
-                    Log("get flat material", name, indent + 1);
-                    Log("e2e get multilayered material", name, indent + 1);
-                    Log("e2e get metal base material", name, indent + 1);
-                    break;
-                case "e2e get multilayered material":
-                    Log("convert mask layer to png", name, indent + 1);
-                    Log("bake multilayered material", name, indent + 1);
-                    Log("save canvas", name, indent + 1);
-                    break;
-                case "bake multilayered material":
-                    Log("e2e mls layer", name, indent + 1);
-                    break;
-                case "e2e mls layer":
-                    Log("get template", name, indent + 1);
-                    Log("get png", name, indent + 1);
-                    Log("decode color bitmap in layer", name, indent + 1);
-                    Log("apply mask to layer", name, indent + 1);
-                    Log("draw to main canvas", name, indent + 1);
-                    break;
-            }
-        }
-    }
     
-    public BlenderMesh? Parse(string path)
+    public (BlenderMesh?, HashSet<MaterialID>?) Parse(string path) 
     {
         var meshFile = _archiveManager.GetCR2WFile(path);
-        return meshFile is not null ? Parse(meshFile) : null;
+        return meshFile is not null ? Parse(meshFile) : (null, null);
     }
 
-    public BlenderMesh? Parse(CR2WFile meshFile)
+    public (BlenderMesh?, HashSet<MaterialID>?) Parse(CR2WFile meshFile)
     {
-        var meshSw = new TrackedStopWatch("e2e mesh parse", _debugTimes);
-        
         if (meshFile is not  { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
-        {
-            meshSw.Stop(false);
-            return null;
-        }
+            return (null, null);
         
-        var geoSw = new TrackedStopWatch("parse geometry", _debugTimes);
         var meshMd = MeshMetadata.BuildMeshMetadata(redMesh, rendBlob);
         var bMesh = ParseGeometryData(redMesh, meshMd);
         
         if (bMesh is null)
-        {
-            meshSw.Stop(false);
-            geoSw.Stop(false);
-            return null;
-        }
+            return (null, null);
+
+        var materialIds = _materialParser.ParseMaterials(bMesh, meshMd, meshFile);
         
-        geoSw.Stop();
-        
-        if (!_materialParser.BakeMaterials(bMesh, meshMd, meshFile))
-        {
-            meshSw.Stop(false);
-            return null;
-        }
-        
-        meshSw.Stop();
-        return bMesh;
+        return (bMesh, materialIds);
     }
     
     private static BlenderMesh? ParseGeometryData(CMesh mesh, MeshMetadata meshMd)
@@ -130,7 +55,7 @@ public class BlenderMeshParser
         bMesh.Indices = new uint[meshMd.NumIndices];
         bMesh.SubMeshIndexOffsets = new uint[meshMd.SubmeshesAtLod.Count];
         bMesh.UVs = new float[meshMd.NumVertices * 2];
-        bMesh.Textures = new Dictionary<string, BlenderTexture[]>();
+        bMesh.Textures = new Dictionary<string, MaterialID[]>();
         
         using var ms = new MemoryStream(rendBlob.RenderBuffer.Buffer.GetBytes());
         var br = new BinaryReader(ms);

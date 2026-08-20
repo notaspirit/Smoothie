@@ -29,8 +29,10 @@ public class MaterialParser
     private BlenderTexture _fallbackColorImage;
     private BlenderTexture _fallbackMaskImage;
     
+    private MaterialID _fallbackMaterialId;
+    
     private readonly ConcurrentDictionary<string, SKBitmap> _imageCache;
-    private readonly ConcurrentDictionary<string, BlenderTexture> _blenderTextureCache;
+    private readonly ConcurrentDictionary<MaterialID, BlenderTexture> _blenderTextureCache;
     private readonly ConcurrentDictionary<string, RedBaseClass> _cr2wCache;
     
     private readonly ConcurrentDictionary<string, SKBitmap[]> _mlMaskCache = new();
@@ -42,13 +44,15 @@ public class MaterialParser
         
         _fallbackColorImage = GetFilledSquareBlenderTexture(SKColors.DeepPink);
         _fallbackMaskImage = GetFilledSquareBlenderTexture(SKColors.Black);
+
+        _fallbackMaterialId = new MaterialID { AlbedoPath = "fallback" };
         
         var cacheConfig = new MemoryCacheConfig();
         cacheConfig.MaxItems = 5000;
         cacheConfig.CacheTickSpan = TimeSpan.FromSeconds(30);
         
         _imageCache = new ConcurrentDictionary<string, SKBitmap>();
-        _blenderTextureCache = new ConcurrentDictionary<string, BlenderTexture>();
+        _blenderTextureCache = new ConcurrentDictionary<MaterialID, BlenderTexture>();
         _cr2wCache = new ConcurrentDictionary<string, RedBaseClass>();
     }
 
@@ -65,10 +69,12 @@ public class MaterialParser
         _blenderTextureCache.Clear();
         _cr2wCache.Clear();
         
+        /*
         Console.WriteLine(BuildLogMessage(_mlMaskUsageCount, "Multilayer Mask"));
         Console.WriteLine(BuildLogMessage(_mlSetupUsageCount, "Multilayer Setup"));
         Console.WriteLine(BuildLogMessage(_multilayerUsageCount, "Multilayer"));
         Console.WriteLine(BuildLogMessage(_metalBaseUsageCount, "Metal Base"));
+        */ 
         
         _mlMaskUsageCount.Clear();
         _mlSetupUsageCount.Clear();
@@ -99,117 +105,106 @@ public class MaterialParser
                $"Average used: {averageSetupUsed}";
     }
     
-    public bool BakeMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
+    public HashSet<MaterialID>? ParseMaterials(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
-            return false;
-        
-        Dictionary<CName, BlenderTexture> processedMaterials = new();
+            return null;
+
+        HashSet<MaterialID> usedMaterials = [];
 
         foreach (var meshApp in redMesh.Appearances)
         {
             if (meshApp.Chunk is null)
                 continue;
             
-            BakeMeshAppearance(bMesh, meshMd, meshFile, meshApp.Chunk, processedMaterials);
+            ParseAppearance(bMesh, meshMd, meshFile, meshApp.Chunk, usedMaterials);
         }
         
-        return true;
+        return usedMaterials;
     }
 
-    private void BakeMeshAppearance(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile,
-        meshMeshAppearance meshApp, Dictionary<CName, BlenderTexture> processedMaterials)
+    private void ParseAppearance(BlenderMesh bMesh, MeshMetadata meshMd, CR2WFile meshFile,
+        meshMeshAppearance meshApp, HashSet<MaterialID> usedMaterials)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
             return;
         
-        bMesh.Textures.TryAdd(meshApp.Name!, new BlenderTexture[meshMd.SubmeshesAtLod.Count]);
+        bMesh.Textures.TryAdd(meshApp.Name!, new MaterialID[meshMd.SubmeshesAtLod.Count]);
         var textures = bMesh.Textures[meshApp.Name!];
         var chunkIndex = 0;
 
         foreach (var chunkMat in meshMd.SubmeshesAtLod.Select(matSubmeshIndex => meshApp.ChunkMaterials[matSubmeshIndex]))
         {
-            if (processedMaterials.TryGetValue(chunkMat, out var texture))
-                textures[chunkIndex++] = texture;
-            else
-            {
-                var text = HandleChunkMaterial(meshFile, chunkMat);
-                processedMaterials.Add(chunkMat, text);
-                textures[chunkIndex++] = text;
-            }
+            var matId = ParseChunkMaterial(meshFile, chunkMat);
+            textures[chunkIndex++] = matId;
+            usedMaterials.Add(matId);
         }
     }
 
-    private BlenderTexture HandleChunkMaterial(CR2WFile meshFile, CName chunkName)
+    private MaterialID ParseChunkMaterial(CR2WFile meshFile, CName chunkName)
     {
         if (meshFile is not { RootChunk: CMesh { RenderResourceBlob.Chunk: rendRenderMeshBlob rendBlob } redMesh })
-            return _fallbackColorImage;
+            return _fallbackMaterialId;
         
         var flatMat = GetFlattenedMaterial(meshFile, chunkName);
         if (flatMat is null)
-            return _fallbackColorImage;
+            return _fallbackMaterialId;
         
-        if (flatMat.BaseMaterial.Contains("metal_base"))
+        var matId = new MaterialID
         {
-            return HandleMetalBaseMaterial(flatMat, meshFile) ?? _fallbackColorImage;
-        }
-        
-        if (flatMat.BaseMaterial.Contains("multilayered"))
-        {
-            return HandleMultilayeredMaterial(flatMat, meshFile) ?? _fallbackColorImage;
-        }
-        
-        return _fallbackColorImage;
+            AlbedoPath = GetAlbedoPath(flatMat),
+            MlSetupPath = GetMlSetupPath(flatMat),
+            MlMaskPath = GetMlMaskPath(flatMat)
+        };
+
+        if (matId.AlbedoPath is not null || (matId.MlSetupPath is not null && matId.MlMaskPath is not null))
+            return matId;
+        return _fallbackMaterialId;
     }
     
-    private BlenderTexture? HandleMetalBaseMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    private string? GetAlbedoPath(FlatMaterial flatMat)
     {
         var baseColorValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "BaseColor").Value;
         if (baseColorValue is CResourceReference<ITexture> texRef)
-        {
-            _metalBaseUsageCount.AddOrUpdate(texRef.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
-            return GetPngFromEmbeddedOrArchive(meshFile, texRef.DepotPath.GetString() ?? "");
-        }
-        
-        Console.WriteLine($"Material with base material {flatMat.BaseMaterial} does not have a BaseColor value!");
-        Console.WriteLine($"Material properties: {string.Join("\n", flatMat.Properties.Select(kvp => $"{kvp.Key}: {kvp.Value}"))}");
+            return texRef.DepotPath.GetString();
+        return null;
+    }
+
+    private string? GetMlSetupPath(FlatMaterial flatMat)
+    {
+        var setupValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "MultilayerSetup").Value;
+        if (setupValue is CResourceReference<Multilayer_Setup> setupRef)
+            return setupRef.DepotPath.GetString();
         return null;
     }
     
-    private BlenderTexture? HandleMultilayeredMaterial(FlatMaterial flatMat, CR2WFile meshFile)
+    private string? GetMlMaskPath(FlatMaterial flatMat)
     {
-        
-        if (!flatMat.Properties.TryGetValue("MultilayerSetup", out var rawMls) ||
-            rawMls is not CResourceReference<Multilayer_Setup> mls)
-        {
-            Console.WriteLine($"Material based on {flatMat.BaseMaterial} has no MultilayerSetup!");
-            Console.WriteLine($"Available properties: {string.Join("\n", flatMat.Properties)}");
+        var maskValue = flatMat.Properties.FirstOrDefault(kvp => kvp.Key == "MultilayerMask").Value;
+        if (maskValue is CResourceReference<Multilayer_Mask> maskRef)
+            return maskRef.DepotPath.GetString();
+        return null;
+    }
+    
+    public BlenderTexture? BakeMultilayeredMaterial(MaterialID matId)
+    {
+        if (matId.MlMaskPath is null || matId.MlSetupPath is null)
             return null;
-        }
         
-        if (!flatMat.Properties.TryGetValue("MultilayerMask", out var rawMlm) ||
-            rawMlm is not CResourceReference<Multilayer_Mask> mlm)
-        {
-            Console.WriteLine($"Material based on {flatMat.BaseMaterial} has no Mask!");
-            return null;
-        }
+        _mlMaskUsageCount.AddOrUpdate(matId.MlMaskPath, 1, (_, value) => value + 1);
+        _mlSetupUsageCount.AddOrUpdate(matId.MlSetupPath, 1, (_, value) => value + 1);
+        _multilayerUsageCount.AddOrUpdate(matId.ToString(), 1, (_, value) => value + 1);
         
-        var textureId = (mls.DepotPath.GetString() ?? "") + (mlm.DepotPath.GetString() ?? "");
-        
-        _mlMaskUsageCount.AddOrUpdate(mlm.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
-        _mlSetupUsageCount.AddOrUpdate(mls.DepotPath.GetString() ?? "", 1, (_, value) => value + 1);
-        _multilayerUsageCount.AddOrUpdate(textureId, 1, (_, value) => value + 1);
-        
-        if (_blenderTextureCache.TryGetValue(textureId, out var cached))
+        if (_blenderTextureCache.TryGetValue(matId, out var cached))
             return cached;
         
-        var setup = GetEmbeddedOrArchiveRootChunk(meshFile, mls.DepotPath.GetString() ?? "");
+        var setup = GetArchiveRootChunk(matId.MlSetupPath);
         if (setup is not Multilayer_Setup setupChunk)
         {
             Console.WriteLine("Material Setup is not Multilayer_Setup!");
             return null;
         }
-        var masks = GetMlMaskAsSkBitmapFromArchive(mlm.DepotPath.GetString() ?? "");
+        var masks = GetMlMaskAsSkBitmapFromArchive(matId.MlMaskPath);
         if (masks is null)
         {
             Console.WriteLine("Failed to load Multilayer Mask!");
@@ -218,7 +213,7 @@ public class MaterialParser
         
         var baked = BakeMultiLayerSetup(setupChunk, masks);
         
-        _blenderTextureCache.TryAdd(textureId, baked);
+        _blenderTextureCache.TryAdd(matId, baked);
         
         return baked;
     }
@@ -463,20 +458,31 @@ public class MaterialParser
         
         return rootChunk;
     }
-    
-    private BlenderTexture? GetPngFromEmbeddedOrArchive(CR2WFile parent, string path)
+
+    public static void UncookDeferredTexture(DeferredDeserializedTexture texture)
     {
-        if (_blenderTextureCache.TryGetValue(path, out var cached))
+        if (texture.Texture is not null)
+            return;
+        
+        using var image = RedImage.FromXBM(texture.Raw);
+        using var bitmap = image.GetSkBitmap(true, true);
+        texture.Texture = bitmap.GetBlenderTexture();
+    }
+    
+    public BlenderTexture? GetXbmAsBlenderTexture(MaterialID matId)
+    {
+        if (_blenderTextureCache.TryGetValue(matId, out var cached))
             return cached;
         
-        var xbmRc = GetEmbeddedOrArchiveRootChunk(parent, path);
+        var xbmRc = GetArchiveRootChunk(matId.AlbedoPath ?? "");
         if (xbmRc is not CBitmapTexture xbm)
             return null;
+        
         using var image = RedImage.FromXBM(xbm);
         using var bitmap = image.GetSkBitmap(true, true);
         var texture = bitmap.GetBlenderTexture();
         
-        _blenderTextureCache.TryAdd(path, texture);
+        _blenderTextureCache.TryAdd(matId, texture);
         
         return texture;
     }
@@ -522,7 +528,7 @@ public class MaterialParser
         return bitmaps;
     }
     
-    private BlenderTexture GetFilledSquareBlenderTexture(SKColor color, int width = 2, int height = 2)
+    public BlenderTexture GetFilledSquareBlenderTexture(SKColor color, int width = 2, int height = 2)
     {
         using var bitmap = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
         bitmap.Erase(color);

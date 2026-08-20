@@ -1,4 +1,5 @@
-using SharpDX;
+using System.Collections.Concurrent;
+using SmoothieBackend.Components;
 using SmoothieBackend.Models;
 using SmoothieBackend.Parsers;
 using WolvenKit;
@@ -7,9 +8,9 @@ using WolvenKit.Common.Services;
 using WolvenKit.Core.Interfaces;
 using WolvenKit.Core.Services;
 using WolvenKit.Modkit.RED4;
-using WolvenKit.RED4.Archive.CR2W;
 using WolvenKit.RED4.CR2W;
 using WolvenKit.RED4.CR2W.Archive;
+using WolvenKit.RED4.Types;
 using Vector3 = SharpDX.Vector3;
 
 namespace SmoothieBackend.Services;
@@ -66,6 +67,7 @@ public partial class WorldStreamingService
         _sectorParser = new StreamingSectorParser(_archiveManager);
         
         LoadSectorDescriptors(BlockPath);
+        AddFallbackMaterial();
 
         _statsLoggerTimer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
     }
@@ -109,7 +111,9 @@ public partial class WorldStreamingService
                 _sectorUnloadQueue.Count != 0 ||
                 _meshLoadQueue.Count != 0 ||
                 _meshUnloadQueue.Count != 0 ||
-                _processNodeStreamingDistances.Count != 0) 
+                _processNodeStreamingDistances.Count != 0 ||
+                _materialLoadQueue.Count != 0 ||
+                _materialUnloadQueue.Count != 0) 
                 continue;
 
             var consumeTasks = new List<Task>
@@ -117,14 +121,15 @@ public partial class WorldStreamingService
                 Task.Run(ConsumeAddedMeshesQueue),
                 Task.Run(ConsumeRemovedMeshesQueue),
                 Task.Run(ConsumeAddedNodesQueue),
-                Task.Run(ConsumeRemovedNodesQueue)
+                Task.Run(ConsumeRemovedNodesQueue),
+                Task.Run(ConsumeAddedMaterialsQueue),
+                Task.Run(ConsumeRemovedMaterialsQueue)
             };
                 
             await Task.WhenAll(consumeTasks);
             
             StopStreaming();
             
-            _meshParser.LogDebugTimes();
             _materialParser.ClearCache();
             
             _doneStreaming = true;
@@ -146,10 +151,13 @@ public partial class WorldStreamingService
             Task.Run(() => ProcessNodeStreamingDistances(_cts.Token));
             Task.Run(() => LoadMeshFromQueue(_cts.Token));
             Task.Run(() => UnloadMeshFromQueue(_cts.Token));
+            Task.Run(() => LoadMaterialFromQueue(_cts.Token));
+            Task.Run(() => UnloadMaterialFromQueue(_cts.Token));
         }
         
         for (var i = 0; i < ThreadCount * 10; i++)
         {
+            Task.Run(() => LoadMaterialFromQueue(_cts.Token));
             Task.Run(() => LoadMeshFromQueue(_cts.Token));
         }
     }
@@ -184,7 +192,13 @@ public partial class WorldStreamingService
                               $"Mesh Unload Queue: {_meshUnloadQueue.Count}\n" +
                               $"\n" +
                               $"Blender Mesh Load Queue: {_blenderMeshLoadQueue.Count}\n" +
-                              $"Blender Mesh Unload Queue: {_blenderMeshUnloadQueue.Count}");
+                              $"Blender Mesh Unload Queue: {_blenderMeshUnloadQueue.Count}\n" +
+                              $"\n" +
+                              $"Active Materials: {_activeMaterials.Count}\n" +
+                              $"Loaded Materials: {_loadedMaterials.Count}\n" +
+                              $"\n" +
+                              $"Material Load Queue: {_materialLoadQueue.Count}\n" +
+                              $"Material Unload Queue: {_materialUnloadQueue.Count}");
         }
     }
 }
